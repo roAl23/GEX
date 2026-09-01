@@ -3,4 +3,5 @@ requests
 pandas
 numpy
 plotly
+scipy
 streamlit-lightweight-charts

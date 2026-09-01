@@ -291,95 +291,48 @@ try:
 
     st.markdown("---")
 
-    # Subplots Layout: Col 1 = Kerzen + VPVR Overlay, Col 2 = GEX, Col 3 = DEX
-    fig = make_subplots(
-        rows=1, cols=3, 
-        shared_yaxes=True,
-        column_widths=[0.5, 0.25, 0.25],
-        subplot_titles=("BTC Perpetual 1H (mit VPVR)", f"GEX Profile ({selected_exp})", "DEX Exposure")
-    )
+   import streamlit.components.v1 as components
 
-    # 1. Candlestick Chart
-    fig.add_trace(
-        go.Candlestick(
-            x=candles['ticks'],
-            open=candles['open'],
-            high=candles['high'],
-            low=candles['low'],
-            close=candles['close'],
-            name="BTC Price"
-        ), row=1, col=1
-    )
+# TradingView Advanced Chart Widget
+tv_widget = """
+<!-- TradingView Widget BEGIN -->
+<div class="tradingview-widget-container" style="height:100%;width:100%">
+  <div id="tradingview_chart" style="height:600px;width:100%"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+  <script type="text/javascript">
+  new TradingView.widget(
+  {
+    "autosize": true,
+    "symbol": "DERIBIT:BTCUSDT.P",
+    "interval": "60",
+    "timezone": "Etc/UTC",
+    "theme": "dark",
+    "style": "1",
+    "locale": "de_DE",
+    "toolbar_bg": "#f1f3f6",
+    "enable_publishing": false,
+    "allow_symbol_change": true,
+    "container_id": "tradingview_chart"
+  }
+  );
+  </script>
+</div>
+<!-- TradingView Widget END -->
+"""
 
-    # 1b. Volume Profile Overlay (VPVR) im Kerzenchart
-    fig.add_trace(
-        go.Bar(
-            x=vpvr['volume'],
-            y=vpvr['bin_mid'],
-            orientation='h',
-            name="Volume Profile",
-            marker_color='rgba(255, 255, 255, 0.15)',
-            opacity=0.4
-        ), row=1, col=1
-    )
+# In Spalten aufteilen: Links TradingView, Rechts GEX & DEX Profile
+col1, col2, col3 = st.columns([0.5, 0.25, 0.25])
 
-    # 2. GEX Profile
-    colors_gex = ['#00E676' if x >= 0 else '#FF5252' for x in summary['gex_oi']]
-    fig.add_trace(
-        go.Bar(
-            x=summary['gex_oi'], 
-            y=summary['strike'], 
-            orientation='h', 
-            name="GEX OI", 
-            marker_color=colors_gex
-        ), row=1, col=2
-    )
+with col1:
+    st.subheader("BTC TradingView Chart")
+    components.html(tv_widget, height=600)
 
-    # 3. DEX Profile
-    fig.add_trace(
-        go.Bar(
-            x=summary['dex'], 
-            y=summary['strike'], 
-            orientation='h', 
-            name="DEX", 
-            marker_color='#AB47BC'
-        ), row=1, col=3
-    )
+with col2:
+    st.subheader("GEX Profile")
+    # Hier der Plotly Bar-Chart für GEX
+    # st.plotly_chart(fig_gex, width="stretch")
 
-    # Preis-Levels über alle Charts legen
-    levels = [
-        (spot, "SPOT", "white", "solid"),
-        (gamma_flip, "FLIP", "yellow", "solid"),
-        (min_upper, "+1 SD", "orange", "dash"),
-        (min_lower, "-1 SD", "orange", "dash"),
-        (max_upper, "+2 SD", "fuchsia", "dash"),
-        (max_lower, "-2 SD", "fuchsia", "dash")
-    ]
-
-    for lvl_price, lvl_name, lvl_color, lvl_style in levels:
-        for c in range(1, 4):
-            fig.add_hline(
-                y=lvl_price, 
-                line_dash=lvl_style, 
-                line_color=lvl_color, 
-                annotation_text=lvl_name if c == 1 else "", 
-                row=1, col=c
-            )
-
-    # Styling & Achsen
-    fig.update_layout(
-        template="plotly_dark",
-        height=800,
-        showlegend=False,
-        xaxis_rangeslider_visible=False,
-        yaxis=dict(
-            title="BTC Preis ($)",
-            tickformat="$,.0f",
-            dtick=500
-        )
-    )
-
-    st.plotly_chart(fig, width="stretch")
-
-except Exception as e:
-    st.error(f"Fehler beim Laden der Daten: {e}")
+with col3:
+    st.subheader("DEX Profile")
+    # Hier der Plotly Bar-Chart für DEX
+    # st.plotly_chart(fig_dex, width="stretch")

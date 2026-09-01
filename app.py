@@ -6,35 +6,43 @@ import time
 from scipy.stats import norm
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Deribit Options Profile Engine Pro", layout="wide")
+# Layout auf Wide stellen
+st.set_page_config(page_title="Deribit Options Terminal", layout="wide")
 
-st.title("📊 Deribit Options Profile Engine + Min/Max Daily Move")
+# --- CUSTOM CSS FÜR PREMIUM TERMINAL LOOK ---
+st.markdown("""
+    <style>
+    .stApp { background-color: #0e1117; color: #fafafa; }
+    .metric-card {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        padding: 15px;
+        border-radius: 8px;
+        text-align: center;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# --- BLACK-SCHOLES BERECHNUNG FÜR GREEKS ---
+st.title("⚡ Deribit Options Profile Engine")
+
+# --- BLACK-SCHOLES BERECHNUNG ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
     if t_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
         return 0.0, 0.0, 0.5
     d1 = (np.log(spot / strike) + (0.5 * iv**2) * t_years) / (iv * np.sqrt(t_years))
     gamma = norm.pdf(d1) / (spot * iv * np.sqrt(t_years))
-    if option_type == 'Call':
-        delta = norm.cdf(d1)
-    else:
-        delta = norm.cdf(d1) - 1.0
+    delta = norm.cdf(d1) if option_type == 'Call' else norm.cdf(d1) - 1.0
     return gamma, delta, norm.cdf(d1)
 
-# 1. Spot Price abrufen
 @st.cache_data(ttl=15)
 def get_btc_spot():
     url = "https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd"
-    res = requests.get(url).json()
-    return res['result']['index_price']
+    return requests.get(url).json()['result']['index_price']
 
-# 2. Optionsdaten abrufen
 @st.cache_data(ttl=30)
 def get_option_data():
     url = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option"
-    res = requests.get(url).json()['result']
-    return pd.DataFrame(res)
+    return pd.DataFrame(requests.get(url).json()['result'])
 
 try:
     spot = get_btc_spot()
@@ -49,75 +57,51 @@ try:
         if col in df_raw.columns:
             df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
 
-    # Restlaufzeit in Jahren
     current_time = time.time()
     def parse_expiration_years(exp_str):
         try:
             exp_date = pd.to_datetime(exp_str, format='%d%b%y')
-            exp_timestamp = exp_date.timestamp() + (8 * 3600)
-            t_seconds = max(exp_timestamp - current_time, 3600)
-            return t_seconds / (365.25 * 84600)
+            return max(exp_date.timestamp() + 28800 - current_time, 3600) / (365.25 * 86400)
         except:
             return 1.0 / 365.25
 
     df_raw['t_years'] = df_raw['expiration_str'].apply(parse_expiration_years)
 
-    # Greeks berechnen
     gammas, deltas = [], []
-    for idx, row in df_raw.iterrows():
-        g, d, _ = calculate_greeks(
-            spot=spot,
-            strike=row['strike'],
-            t_years=row['t_years'],
-            iv=row['mark_iv'] / 100.0,
-            option_type=row['type']
-        )
+    for _, row in df_raw.iterrows():
+        g, d, _ = calculate_greeks(spot, row['strike'], row['t_years'], row['mark_iv'] / 100.0, row['type'])
         gammas.append(g)
         deltas.append(d)
 
     df_raw['gamma'] = gammas
     df_raw['delta'] = deltas
 
-    # ==========================================
-    # SIDEBAR: KONTROLLEN & EINSTELLUNGEN
-    # ==========================================
-    st.sidebar.header("🎛️ Profile Selection")
-    show_gex    = st.sidebar.checkbox("🟠 Show GEX Normal (Gamma OI)", value=True)
-    show_gex_vol = st.sidebar.checkbox("🩵 Show GEX Volume (Orderflow)", value=True)
-    show_dex    = st.sidebar.checkbox("🟣 Show DEX (Delta Exposure)", value=True)
-    show_oi     = st.sidebar.checkbox("🟡 Show Open Interest (Contracts)", value=True)
+    # SIDEBAR
+    st.sidebar.markdown("### 🎛️ Profil-Steuerung")
+    show_gex    = st.sidebar.checkbox("🟠 GEX Normal (Gamma OI)", value=True)
+    show_gex_vol = st.sidebar.checkbox("🩵 GEX Volume (Orderflow)", value=True)
+    show_dex    = st.sidebar.checkbox("🟣 DEX (Delta Exposure)", value=True)
+    show_oi     = st.sidebar.checkbox("🟡 Open Interest (Contracts)", value=True)
 
-    st.sidebar.header("🗓️ Expiry Filter")
     expirations = sorted(df_raw['expiration_str'].unique().tolist())
-    selected_exp = st.sidebar.selectbox("Select Expiration Date", ["ALL (Aggregated)"] + expirations, index=0)
+    selected_exp = st.sidebar.selectbox("🗓️ Expiry Filter", ["ALL (Aggregated)"] + expirations)
+    zoom_margin = st.sidebar.slider("📐 Zoom Range (± USD)", 1000, 10000, 4000, step=500)
 
-    st.sidebar.header("📐 Display Range")
-    zoom_margin = st.sidebar.slider("Strike Zoom Range (+/- USD)", 1000, 10000, 4000, step=500)
+    df = df_raw if selected_exp == "ALL (Aggregated)" else df_raw[df_raw['expiration_str'] == selected_exp]
 
-    if selected_exp != "ALL (Aggregated)":
-        df = df_raw[df_raw['expiration_str'] == selected_exp].copy()
-    else:
-        df = df_raw.copy()
-
-    # Kennzahlen für Profile berechnen
     df['gex_normal'] = np.where(df['type'] == 'Call', df['gamma'] * df['open_interest'] * spot, -df['gamma'] * df['open_interest'] * spot) / 1e6
     df['gex_volume'] = np.where(df['type'] == 'Call', df['gamma'] * df['volume'] * spot, -df['gamma'] * df['volume'] * spot) / 1e6
     df['dex_val']    = df['delta'] * df['open_interest'] * spot / 1e6
     df['oi_val']     = df['open_interest']
 
     y_min, y_max = spot - zoom_margin, spot + zoom_margin
-    df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)].copy()
+    df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)]
 
     summary = df_filtered.groupby('strike').agg({
-        'gex_normal': 'sum',
-        'gex_volume': 'sum',
-        'dex_val': 'sum',
-        'oi_val': 'sum',
-        'mark_iv': 'mean'
+        'gex_normal': 'sum', 'gex_volume': 'sum', 'dex_val': 'sum', 'oi_val': 'sum', 'mark_iv': 'mean'
     }).reset_index()
 
-    # Kern-Key-Levels berechnen
-    summary_sorted = summary.sort_values('strike').copy()
+    summary_sorted = summary.sort_values('strike')
     summary_sorted['cum_gex'] = summary_sorted['gex_normal'].cumsum()
     zero_crossings = summary_sorted[np.sign(summary_sorted['cum_gex']).diff() != 0]
     gamma_flip = zero_crossings['strike'].iloc[0] if len(zero_crossings) > 0 else spot
@@ -126,16 +110,12 @@ try:
     put_wall  = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['gex_normal'].sum().abs().idxmax() if not df_filtered.empty else spot
     max_pain  = summary_sorted.loc[summary_sorted['oi_val'].idxmax()]['strike'] if not summary_sorted.empty else spot
 
-    # IV & Expected Moves (Min/Max Daily Move 1SD / 2SD)
     atm_strike = summary_sorted.iloc[(summary_sorted['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not summary_sorted.empty else spot
     matching_iv = summary_sorted[summary_sorted['strike'] == atm_strike]['mark_iv'].values
-    atm_iv = (matching_iv[0] / 100.0) if len(matching_iv) > 0 and not np.isnan(matching_iv[0]) and matching_iv[0] > 0 else 0.55
-
+    atm_iv = (matching_iv[0] / 100.0) if len(matching_iv) > 0 and not np.isnan(matching_iv[0]) else 0.55
     exp_move_1sd = spot * atm_iv * np.sqrt(1 / 365.0)
-    min_upper, min_lower = spot + exp_move_1sd, spot - exp_move_1sd
-    max_upper, max_lower = spot + (2 * exp_move_1sd), spot - (2 * exp_move_1sd)
 
-    # Top Metrics Dashboard
+    # Clean Metrics Row
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("BTC Spot", f"${spot:,.1f}")
     m2.metric("Gamma Flip", f"${gamma_flip:,.0f}")
@@ -144,69 +124,48 @@ try:
     m5.metric("Max Pain Pin", f"${max_pain:,.0f}")
     m6.metric("±1 SD Move", f"±${exp_move_1sd:,.0f}")
 
-    st.markdown("---")
+    st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
 
-    # ==========================================
-    # PLOTLY PROFIL-DIAGRAMM (VOLUME PROFILE ENGINE)
-    # ==========================================
+    # --- PLOTLY PROFIL-DIAGRAMM (CLEAN & MODERN) ---
     fig = go.Figure()
 
     if show_gex:
-        fig.add_trace(go.Bar(
-            x=summary['gex_normal'], y=summary['strike'], orientation='h',
-            name='🟠 GEX Normal (Gamma OI)', marker_color='#FF9800'
-        ))
+        fig.add_trace(go.Bar(x=summary['gex_normal'], y=summary['strike'], orientation='h', name='GEX Normal', marker_color='#FF9800'))
     if show_gex_vol:
-        fig.add_trace(go.Bar(
-            x=summary['gex_volume'], y=summary['strike'], orientation='h',
-            name='🩵 GEX Volume (Orderflow)', marker_color='#00BCD4'
-        ))
+        fig.add_trace(go.Bar(x=summary['gex_volume'], y=summary['strike'], orientation='h', name='GEX Volume', marker_color='#00BCD4'))
     if show_dex:
-        fig.add_trace(go.Bar(
-            x=summary['dex_val'], y=summary['strike'], orientation='h',
-            name='🟣 DEX (Delta Exposure)', marker_color='#9C27B0'
-        ))
+        fig.add_trace(go.Bar(x=summary['dex_val'], y=summary['strike'], orientation='h', name='DEX', marker_color='#AB47BC'))
     if show_oi:
-        fig.add_trace(go.Bar(
-            x=summary['oi_val'], y=summary['strike'], orientation='h',
-            name='🟡 Open Interest (Contracts)', marker_color='#FFEB3B'
-        ))
+        fig.add_trace(go.Bar(x=summary['oi_val'], y=summary['strike'], orientation='h', name='Open Interest', marker_color='#FFEE58'))
 
-    # Linien für alle Levels aus dem Pine Script einzeichnen
     levels = [
-        (spot, "SPOT", "white", "solid", 2),
-        (gamma_flip, "GAMMA FLIP", "yellow", "solid", 3),
-        (call_wall, "Intraday Call Wall", "red", "dot", 2),
-        (put_wall, "Intraday Put Wall", "green", "dot", 2),
-        (max_pain, "Max Pain Pin", "purple", "dash", 2),
-        (min_upper, "MIN Move Upper (+1 SD)", "orange", "dash", 1),
-        (min_lower, "MIN Move Lower (-1 SD)", "orange", "dash", 1),
-        (max_upper, "MAX Move Upper (+2 SD)", "fuchsia", "dash", 2),
-        (max_lower, "MAX Move Lower (-2 SD)", "fuchsia", "dash", 2)
+        (spot, "SPOT", "#ffffff", "solid", 2),
+        (gamma_flip, "GAMMA FLIP", "#ffeb3b", "solid", 3),
+        (call_wall, "Call Wall", "#ff5252", "dot", 2),
+        (put_wall, "Put Wall", "#66bb6a", "dot", 2),
+        (max_pain, "Max Pain", "#ab47bc", "dash", 2),
+        (spot + exp_move_1sd, "+1 SD Upper", "#ffa726", "dash", 1),
+        (spot - exp_move_1sd, "-1 SD Lower", "#ffa726", "dash", 1),
     ]
 
     for price, name, color, style, width in levels:
-        fig.add_hline(
-            y=price, 
-            line_dash=style, 
-            line_color=color, 
-            line_width=width,
-            annotation_text=f"{name}: ${price:,.0f}",
-            annotation_position="top right"
-        )
+        fig.add_hline(y=price, line_dash=style, line_color=color, line_width=width,
+                      annotation_text=f"  {name}: ${price:,.0f}", annotation_position="top right",
+                      annotation_font_color=color)
 
     fig.update_layout(
         template="plotly_dark",
-        height=750,
+        paper_bgcolor='#0e1117',
+        plot_bgcolor='#161b22',
+        height=800,
         barmode='group',
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)"),
-        xaxis=dict(title="Profile Metric Value"),
-        margin=dict(l=20, r=20, t=40, b=20)
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor='rgba(0,0,0,0)'),
+        yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)", gridcolor="#30363d"),
+        xaxis=dict(title="Metric Exposure Value", gridcolor="#30363d"),
+        margin=dict(l=40, r=40, t=40, b=40)
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
-    st.error(f"Fehler beim Laden des Dashboards: {e}")
+    st.error(f"Fehler: {e}")

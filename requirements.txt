@@ -3,3 +3,4 @@ requests
 pandas
 numpy
 plotly
+streamlit-lightweight-charts

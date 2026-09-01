@@ -4,11 +4,11 @@ import pandas as pd
 import numpy as np
 import time
 from scipy.stats import norm
-from streamlit_lightweight_charts import renderLightweightCharts
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Deribit GEX Pro Dashboard", layout="wide")
 
-st.title("📈 BTC TradingView Chart & Options Analytics (GEX/DEX/Expected Move)")
+st.title("📈 BTC TradingView & Options GEX/DEX Analytics Suite")
 
 # --- BLACK-SCHOLES BERECHNUNG FÜR GAMMA & DELTA ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
@@ -41,7 +41,7 @@ def get_btc_candles(resolution="60"):
     res = requests.get(url).json()['result']
     
     df = pd.DataFrame({
-        'time': [t // 1000 for t in res['ticks']],
+        'ticks': pd.to_datetime(res['ticks'], unit='ms'),
         'open': res['open'],
         'high': res['high'],
         'low': res['low'],
@@ -115,7 +115,8 @@ try:
     df['dex'] = df['delta'] * df['open_interest'] * spot / 1e6
 
     zoom_margin = 3500
-    df_filtered = df[(df['strike'] >= spot - zoom_margin) & (df['strike'] <= spot + zoom_margin)].copy()
+    y_min, y_max = spot - zoom_margin, spot + zoom_margin
+    df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)].copy()
 
     summary = df_filtered.groupby('strike').agg({'gex_oi': 'sum', 'dex': 'sum', 'open_interest': 'sum'}).reset_index()
     summary_sorted = summary.sort_values('strike').copy()
@@ -145,51 +146,78 @@ try:
 
     st.markdown("---")
 
-    # TRADINGVIEW LIGHTWEIGHT CHART SETUP
-    candle_data = candles[['time', 'open', 'high', 'low', 'close']].to_dict('records')
-    volume_data = candles[['time', 'volume', 'open', 'close']].copy()
-    volume_data['color'] = np.where(volume_data['close'] >= volume_data['open'], 'rgba(38, 166, 154, 0.5)', 'rgba(239, 83, 80, 0.5)')
-    volume_data = volume_data.rename(columns={'volume': 'value'}).drop(columns=['open', 'close']).to_dict('records')
+    # LAYOUT: 3 Spalten (Kerzenchart | GEX Profile | DEX Profile)
+    col_chart, col_gex, col_dex = st.columns([0.48, 0.26, 0.26])
 
-    chart_options = {
-        "height": 650,
-        "layout": {
-            "background": {"type": "solid", "color": "#131722"},
-            "textColor": "#d1d4dc"
-        },
-        "grid": {
-            "vertLines": {"color": "#2B2B43"},
-            "horzLines": {"color": "#2B2B43"}
-        },
-        "crosshair": {"mode": 0},
-        "priceScale": {"borderColor": "#555"},
-        "timeScale": {"borderColor": "#555", "timeVisible": True}
-    }
+    # Gemeinsame Linien-Funktion für den Kerzenchart
+    def add_standard_lines(fig):
+        lines = [
+            (spot, "SPOT", "white", "solid"),
+            (gamma_flip, "GAMMA FLIP", "yellow", "solid"),
+            (min_upper, "+1 SD", "orange", "dash"),
+            (min_lower, "-1 SD", "orange", "dash"),
+            (max_upper, "+2 SD", "fuchsia", "dash"),
+            (max_lower, "-2 SD", "fuchsia", "dash"),
+            (call_wall, "Call Wall", "red", "dot"),
+            (put_wall, "Put Wall", "green", "dot")
+        ]
+        for price, name, color, style in lines:
+            fig.add_hline(y=price, line_dash=style, line_color=color, annotation_text=f"{name} ({price:,.0f})")
 
-    series_candlestick = [{
-        "type": "Candlestick",
-        "data": candle_data,
-        "options": {
-            "upColor": "#26a69a",
-            "downColor": "#ef5350",
-            "borderVisible": False,
-            "wickUpColor": "#26a69a",
-            "wickDownColor": "#ef5350"
-        }
-    }, {
-        "type": "Histogram",
-        "data": volume_data,
-        "options": {
-            "priceFormat": {"type": "volume"},
-            "priceScaleId": ""
-        },
-        "priceScale": {
-            "scaleMargins": {"top": 0.8, "bottom": 0}
-        }
-    }]
+    # 1. Kerzenchart (Linke Spalte)
+    with col_chart:
+        st.subheader("📊 BTC Perpetual 1H & Key Levels")
+        fig_candle = go.Figure()
+        fig_candle.add_trace(go.Candlestick(
+            x=candles['ticks'], open=candles['open'], high=candles['high'], low=candles['low'], close=candles['close'], name="BTC"
+        ))
+        
+        # VPVR Volumenprofil als Overlay
+        nbins = 25
+        price_bins = pd.cut(candles['close'], bins=nbins)
+        vpvr = candles.groupby(price_bins, observed=False)['volume'].sum().reset_index()
+        vpvr['bin_mid'] = vpvr['close'].apply(lambda x: x.mid)
+        
+        fig_candle.add_trace(go.Bar(
+            x=vpvr['volume'], y=vpvr['bin_mid'], orientation='h', name="Volume", marker_color='rgba(255,255,255,0.1)', width=150
+        ))
 
-    st.subheader(f"📺 TradingView Chart (Expiry: {selected_exp})")
-    renderLightweightCharts([{"chart": chart_options, "series": series_candlestick}], key="tv_chart")
+        add_standard_lines(fig_candle)
+        fig_candle.update_layout(
+            template="plotly_dark", height=700, showlegend=False, xaxis_rangeslider_visible=False,
+            yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Preis ($)")
+        )
+        st.plotly_chart(fig_candle, use_container_width=True)
+
+    # 2. GEX Profile (Mittlere Spalte)
+    with col_gex:
+        st.subheader(f"🟠 GEX ({selected_exp})")
+        colors_gex = ['#00E676' if x >= 0 else '#FF5252' for x in summary['gex_oi']]
+        
+        fig_gex = go.Figure()
+        fig_gex.add_trace(go.Bar(x=summary['gex_oi'], y=summary['strike'], orientation='h', marker_color=colors_gex, width=200))
+        add_standard_lines(fig_gex)
+        
+        fig_gex.update_layout(
+            template="plotly_dark", height=700, showlegend=False,
+            yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", showticklabels=False),
+            xaxis=dict(title="GEX ($M)")
+        )
+        st.plotly_chart(fig_gex, use_container_width=True)
+
+    # 3. DEX Profile (Rechte Spalte)
+    with col_dex:
+        st.subheader("🟣 DEX Profile")
+        fig_dex = go.Figure()
+        fig_dex.add_trace(go.Bar(x=summary['dex'], y=summary['strike'], orientation='h', marker_color='#AB47BC', width=200))
+        add_standard_lines(fig_dex)
+        
+        fig_dex.update_layout(
+            template="plotly_dark", height=700, showlegend=False,
+            yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", showticklabels=False),
+            xaxis=dict(title="DEX ($M)")
+        )
+        st.plotly_chart(fig_dex, use_container_width=True)
 
 except Exception as e:
     st.error(f"Fehler beim Laden des Dashboards: {e}")

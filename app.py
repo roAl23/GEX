@@ -83,7 +83,6 @@ try:
     showOi     = st.sidebar.checkbox("🟡 Show Open Interest", value=True)
     
     st.sidebar.markdown("### ⚖️ Visual Scaling (Divisors)")
-    st.sidebar.caption("Gleicht die Balkenhöhen an, damit sie auf denselben Chart passen (wie im Pine Script).")
     div_gex = st.sidebar.number_input("GEX Divisor", value=150.0, step=10.0)
     div_dex = st.sidebar.number_input("DEX Divisor", value=0.3, step=0.1)
     div_oi  = st.sidebar.number_input("OI Divisor", value=10.0, step=1.0)
@@ -96,10 +95,10 @@ try:
 
     df = df_raw if selected_exp == "ALL (Aggregated)" else df_raw[df_raw['expiration_str'] == selected_exp]
 
-    # --- KENNZAHLEN (ZURÜCK ZUR BEWÄHRTEN LOGIK) ---
+    # --- KENNZAHLEN LOGIK ---
     df['gex_normal'] = np.where(df['type'] == 'Call', df['gamma'] * df['open_interest'] * spot, -df['gamma'] * df['open_interest'] * spot)
     df['gex_volume'] = np.where(df['type'] == 'Call', df['gamma'] * df['volume'] * spot, -df['gamma'] * df['volume'] * spot)
-    df['dex_val']    = (df['delta'] * df['open_interest'] * spot) / 1e6  # DEX standardmäßig in Mio
+    df['dex_val']    = (df['delta'] * df['open_interest'] * spot) / 1e6
     df['oi_val']     = df['open_interest']
 
     y_min, y_max = spot - zoom_margin, spot + zoom_margin
@@ -113,18 +112,19 @@ try:
         'mark_iv': 'mean'
     }).reset_index().sort_values('strike')
 
-    # VISUELLE SKALIERUNG ANWENDEN
+    # Visuelle Skalierung
     summary['gex_norm_scaled'] = summary['gex_normal'] / div_gex
     summary['gex_vol_scaled']  = summary['gex_volume'] / div_gex
     summary['dex_val_scaled']  = summary['dex_val'] / div_dex
     summary['oi_val_scaled']   = summary['oi_val'] / div_oi
 
+    # Call / Put OI trennen
     calls_dict = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['open_interest'].sum().to_dict()
     puts_dict = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['open_interest'].sum().to_dict()
     summary['call_oi'] = summary['strike'].map(calls_dict).fillna(0)
     summary['put_oi'] = summary['strike'].map(puts_dict).fillna(0)
 
-    # Core Key Levels (basierend auf unskalierten Werten)
+    # Key Levels
     summary['cum_gex'] = summary['gex_normal'].cumsum()
     zero_crossings = summary[np.sign(summary['cum_gex']).diff() != 0]
     gammaFlip = zero_crossings['strike'].iloc[0] if len(zero_crossings) > 0 else spot
@@ -132,7 +132,7 @@ try:
     callWallIntra = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['gex_normal'].sum().idxmax() if not df_filtered.empty else spot
     putWallIntra  = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['gex_normal'].sum().abs().idxmax() if not df_filtered.empty else spot
 
-    # Echte Max-Pain-Berechnung
+    # Max Pain
     strike_arr = summary['strike'].values
     call_oi_arr = summary['call_oi'].values
     put_oi_arr = summary['put_oi'].values
@@ -151,22 +151,69 @@ try:
     minMoveUpper, minMoveLower = spot + exp_move_1sd, spot - exp_move_1sd
     maxMoveUpper, maxMoveLower = spot + (2 * exp_move_1sd), spot - (2 * exp_move_1sd)
 
-    # --- TOP METRICS ---
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("BTC Spot", f"${spot:,.1f}")
-    m2.metric("Gamma Flip", f"${gammaFlip:,.0f}")
-    m3.metric("Intraday Call Wall", f"${callWallIntra:,.0f}")
-    m4.metric("Intraday Put Wall", f"${putWallIntra:,.0f}")
-    m5.metric("Max Pain Pin", f"${maxPain:,.0f}")
-    m6.metric("±1 SD Move", f"±${exp_move_1sd:,.0f}")
+    # --- MACRO BERECHNUNGEN (Für Sidebar Tabelle) ---
+    net_gamma = summary['gex_normal'].sum()
+    net_vex = summary['gex_volume'].sum()
+    gamma_regime = "🟢 Positiv (Low Vol)" if net_gamma > 0 else "🔴 Negativ (High Vol)"
+    
+    total_call_oi = summary['call_oi'].sum()
+    total_put_oi = summary['put_oi'].sum()
+    pc_ratio = (total_put_oi / total_call_oi) if total_call_oi > 0 else 0.0
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    # ==========================================
+    # SIDEBAR TABELLE (Market Overview)
+    # ==========================================
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📋 Market Overview")
+    
+    # HTML Tabelle für ein sauberes, professionelles Terminal-Design
+    sidebar_table_html = f"""
+    <table style="width:100%; border-collapse: collapse; font-size: 14px; text-align: left; color: #e6edf3;">
+        <tr style="border-bottom: 1px solid #30363d;">
+            <th style="padding: 8px 0;">Metrik</th>
+            <th style="padding: 8px 0; text-align: right;">Wert</th>
+        </tr>
+        <tr style="border-bottom: 1px solid #30363d;">
+            <td style="padding: 8px 0; color: #8b949e;">Net GEX</td>
+            <td style="padding: 8px 0; text-align: right;">{net_gamma:,.0f}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #30363d;">
+            <td style="padding: 8px 0; color: #8b949e;">Net VEX</td>
+            <td style="padding: 8px 0; text-align: right;">{net_vex:,.0f}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #30363d;">
+            <td style="padding: 8px 0; color: #8b949e;">Regime</td>
+            <td style="padding: 8px 0; text-align: right;">{gamma_regime}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #30363d;">
+            <td style="padding: 8px 0; color: #8b949e;">P/C Ratio</td>
+            <td style="padding: 8px 0; text-align: right;">{pc_ratio:.2f}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #30363d;">
+            <td style="padding: 8px 0; color: #8b949e;">Max Pain</td>
+            <td style="padding: 8px 0; text-align: right;">${maxPain:,.0f}</td>
+        </tr>
+        <tr>
+            <td style="padding: 8px 0; color: #8b949e;">Gamma Flip</td>
+            <td style="padding: 8px 0; text-align: right;">${gammaFlip:,.0f}</td>
+        </tr>
+    </table>
+    """
+    st.sidebar.markdown(sidebar_table_html, unsafe_allow_html=True)
+
+    # --- TOP METRICS ---
+    st.markdown("#### 🔑 Key Levels & Spot")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("BTC Spot", f"${spot:,.1f}")
+    m2.metric("Intraday Call Wall", f"${callWallIntra:,.0f}")
+    m3.metric("Intraday Put Wall", f"${putWallIntra:,.0f}")
+    m4.metric("±1 SD Move", f"±${exp_move_1sd:,.0f}")
+
+    st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
 
     # --- CHART ---
     fig = go.Figure()
 
-    # Wir plotten jetzt die SKALIERTEN Werte (damit sie sauber nebeneinander aussehen)
-    # Der Hover-Text (customdata) zeigt aber die ECHTEN, unskalierten Werte an!
     if showGex:
         fig.add_trace(go.Bar(x=summary['strike'], y=summary['gex_norm_scaled'], customdata=summary['gex_normal'], hovertemplate='Strike: %{x}<br>GEX Normal: %{customdata:,.0f}<extra></extra>', name='🟠 GEX Normal', marker_color='#ff9800'))
     if showGexVol:
@@ -179,27 +226,27 @@ try:
     v_lines = [
         (spot, "SPOT", "#ffffff", "solid", 2),
         (gammaFlip, "GAMMA FLIP", "#ffeb3b", "solid", 3),
-        (callWallIntra, "Intraday Call Wall", "#ff5252", "dot", 2),
-        (putWallIntra, "Intraday Put Wall", "#66bb6a", "dot", 2),
+        (callWallIntra, "Call Wall", "#ff5252", "dot", 2),
+        (putWallIntra, "Put Wall", "#66bb6a", "dot", 2),
         (maxPain, "Max Pain", "#ab47bc", "dash", 2),
     ]
 
     if showDailyMove:
         v_lines.extend([
-            (minMoveUpper, "MIN Move Upper (+1 SD)", "#ffa726", "dash", 1),
-            (minMoveLower, "MIN Move Lower (-1 SD)", "#ffa726", "dash", 1),
-            (maxMoveUpper, "MAX Move Upper (+2 SD)", "#f06292", "dash", 2),
-            (maxMoveLower, "MAX Move Lower (-2 SD)", "#f06292", "dash", 2),
+            (minMoveUpper, "MIN Move (+1 SD)", "#ffa726", "dash", 1),
+            (minMoveLower, "MIN Move (-1 SD)", "#ffa726", "dash", 1),
+            (maxMoveUpper, "MAX Move (+2 SD)", "#f06292", "dash", 2),
+            (maxMoveLower, "MAX Move (-2 SD)", "#f06292", "dash", 2),
         ])
 
     for x_val, name, color, style, width in v_lines:
-        fig.add_vline(x=x_val, line_dash=style, line_color=color, line_width=width, annotation_text=f"{name} (${x_val:,.0f})", annotation_position="top", annotation_font_color=color, annotation_font_size=10)
+        fig.add_vline(x=x_val, line_dash=style, line_color=color, line_width=width, annotation_text=f"{name}", annotation_position="top", annotation_font_color=color, annotation_font_size=10)
 
     fig.update_layout(
         template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#11141d', height=750, barmode='group',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor='rgba(0,0,0,0)'),
         xaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)", gridcolor="#21262d"),
-        yaxis=dict(title="Scaled Profile Value (Visual Only)", gridcolor="#21262d", showticklabels=False), # Y-Achsen Labels versteckt, da skaliert
+        yaxis=dict(title="Scaled Profile Value (Visual Only)", gridcolor="#21262d", showticklabels=False),
         margin=dict(l=40, r=40, t=50, b=40)
     )
 

@@ -6,14 +6,8 @@ import time
 from scipy.stats import norm
 import plotly.graph_objects as go
 
-# 1. Page Config (Full Width)
-st.set_page_config(
-    page_title="Deribit Options Profile Engine Pro",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Deribit Options Profile Engine Pro", layout="wide", initial_sidebar_state="expanded")
 
-# --- CUSTOM CSS FÜR TERMINAL OPTIK ---
 st.markdown("""
     <style>
     .stApp { background-color: #0b0e14; color: #e6edf3; }
@@ -29,7 +23,6 @@ st.markdown("""
 
 st.markdown("### 📊 Deribit Options Profile Engine + Min/Max Daily Move")
 
-# --- BLACK-SCHOLES GREEKS BERECHNUNG ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
     if t_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
         return 0.0, 0.0, 0.5
@@ -55,7 +48,6 @@ try:
     spot = get_btc_spot()
     df_raw = get_option_data()
 
-    # Preprocessing der Instrumente
     df_raw['expiration_str'] = df_raw['instrument_name'].apply(lambda x: x.split('-')[1])
     df_raw['strike'] = df_raw['instrument_name'].apply(lambda x: float(x.split('-')[2]))
     df_raw['type'] = df_raw['instrument_name'].apply(lambda x: 'Call' if x.endswith('-C') else 'Put')
@@ -83,47 +75,32 @@ try:
     df_raw['gamma'] = gammas
     df_raw['delta'] = deltas
 
-    # ==========================================
-    # SIDEBAR KONTROLLEN
-    # ==========================================
+    # --- SIDEBAR KONTROLLEN ---
     st.sidebar.markdown("### 🎛️ Profile Selection")
-    showGex    = st.sidebar.checkbox("🟠 Show GEX Normal (Gamma Exposure)", value=True)
-    showGexVol = st.sidebar.checkbox("🩵 Show GEX Volume (Orderflow)", value=True)
-    showDex    = st.sidebar.checkbox("🟣 Show DEX (Delta Exposure)", value=True)
-    showOi     = st.sidebar.checkbox("🟡 Show Open Interest (Contracts)", value=True)
+    showGex    = st.sidebar.checkbox("🟠 Show GEX Normal (Gamma)", value=True)
+    showGexVol = st.sidebar.checkbox("🩵 Show GEX Volume", value=True)
+    showDex    = st.sidebar.checkbox("🟣 Show DEX (Delta)", value=True)
+    showOi     = st.sidebar.checkbox("🟡 Show Open Interest", value=True)
+    
+    st.sidebar.markdown("### ⚖️ Visual Scaling (Divisors)")
+    st.sidebar.caption("Gleicht die Balkenhöhen an, damit sie auf denselben Chart passen (wie im Pine Script).")
+    div_gex = st.sidebar.number_input("GEX Divisor", value=150.0, step=10.0)
+    div_dex = st.sidebar.number_input("DEX Divisor", value=0.3, step=0.1)
+    div_oi  = st.sidebar.number_input("OI Divisor", value=10.0, step=1.0)
 
     st.sidebar.markdown("---")
     showDailyMove = st.sidebar.checkbox("Show Daily Move Range Lines", value=True)
-
     expirations = sorted(df_raw['expiration_str'].unique().tolist())
     selected_exp = st.sidebar.selectbox("🗓️ Expiry Filter", ["ALL (Aggregated)"] + expirations)
     zoom_margin = st.sidebar.slider("📐 Zoom Range (± USD um Spot)", 1000, 15000, 4000, step=500)
 
     df = df_raw if selected_exp == "ALL (Aggregated)" else df_raw[df_raw['expiration_str'] == selected_exp]
 
-    # ==========================================
-    # KORREKTE KENNZAHLEN-BERECHNUNG (DERIBIT LOGIK)
-    # ==========================================
-    contract_multiplier = 1.0  # 1 Kontrakt = 1 BTC
-
-    # 1. GEX Normal & Volume (Gamma * OI/Volume * Multiplier * Spot^2) in Milliarden USD
-    df['gex_normal'] = np.where(
-        df['type'] == 'Call', 
-        df['gamma'] * df['open_interest'] * contract_multiplier * (spot ** 2), 
-        -df['gamma'] * df['open_interest'] * contract_multiplier * (spot ** 2)
-    ) / 1e9
-
-    df['gex_volume'] = np.where(
-        df['type'] == 'Call', 
-        df['gamma'] * df['volume'] * contract_multiplier * (spot ** 2), 
-        -df['gamma'] * df['volume'] * contract_multiplier * (spot ** 2)
-    ) / 1e9
-
-    # 2. DEX (Delta Exposure) in Millionen USD
-    df['dex_val'] = (df['delta'] * df['open_interest'] * contract_multiplier * spot) / 1e6
-
-    # 3. Open Interest in Kontrakten
-    df['oi_val'] = df['open_interest']
+    # --- KENNZAHLEN (ZURÜCK ZUR BEWÄHRTEN LOGIK) ---
+    df['gex_normal'] = np.where(df['type'] == 'Call', df['gamma'] * df['open_interest'] * spot, -df['gamma'] * df['open_interest'] * spot)
+    df['gex_volume'] = np.where(df['type'] == 'Call', df['gamma'] * df['volume'] * spot, -df['gamma'] * df['volume'] * spot)
+    df['dex_val']    = (df['delta'] * df['open_interest'] * spot) / 1e6  # DEX standardmäßig in Mio
+    df['oi_val']     = df['open_interest']
 
     y_min, y_max = spot - zoom_margin, spot + zoom_margin
     df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)]
@@ -136,13 +113,18 @@ try:
         'mark_iv': 'mean'
     }).reset_index().sort_values('strike')
 
-    # Get separate call and put OI for true Max Pain calculation
+    # VISUELLE SKALIERUNG ANWENDEN
+    summary['gex_norm_scaled'] = summary['gex_normal'] / div_gex
+    summary['gex_vol_scaled']  = summary['gex_volume'] / div_gex
+    summary['dex_val_scaled']  = summary['dex_val'] / div_dex
+    summary['oi_val_scaled']   = summary['oi_val'] / div_oi
+
     calls_dict = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['open_interest'].sum().to_dict()
     puts_dict = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['open_interest'].sum().to_dict()
     summary['call_oi'] = summary['strike'].map(calls_dict).fillna(0)
     summary['put_oi'] = summary['strike'].map(puts_dict).fillna(0)
 
-    # Core Key Levels
+    # Core Key Levels (basierend auf unskalierten Werten)
     summary['cum_gex'] = summary['gex_normal'].cumsum()
     zero_crossings = summary[np.sign(summary['cum_gex']).diff() != 0]
     gammaFlip = zero_crossings['strike'].iloc[0] if len(zero_crossings) > 0 else spot
@@ -154,25 +136,22 @@ try:
     strike_arr = summary['strike'].values
     call_oi_arr = summary['call_oi'].values
     put_oi_arr = summary['put_oi'].values
-    
     pains = []
     for s in strike_arr:
         call_payout = np.where(s > strike_arr, (s - strike_arr) * call_oi_arr, 0).sum()
         put_payout = np.where(strike_arr > s, (strike_arr - s) * put_oi_arr, 0).sum()
         pains.append(call_payout + put_payout)
-    
     maxPain = strike_arr[np.argmin(pains)] if len(pains) > 0 else spot
 
-    # IV & Expected Moves (±1 SD / ±2 SD)
+    # Expected Move
     atm_strike = summary.iloc[(summary['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not summary.empty else spot
     matching_iv = summary[summary['strike'] == atm_strike]['mark_iv'].values
     atm_iv = (matching_iv[0] / 100.0) if len(matching_iv) > 0 and not np.isnan(matching_iv[0]) else 0.55
-    
     exp_move_1sd = spot * atm_iv * np.sqrt(1 / 365.0)
     minMoveUpper, minMoveLower = spot + exp_move_1sd, spot - exp_move_1sd
     maxMoveUpper, maxMoveLower = spot + (2 * exp_move_1sd), spot - (2 * exp_move_1sd)
 
-    # --- TOP METRIC ROW ---
+    # --- TOP METRICS ---
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("BTC Spot", f"${spot:,.1f}")
     m2.metric("Gamma Flip", f"${gammaFlip:,.0f}")
@@ -183,27 +162,26 @@ try:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ==========================================
-    # PLOTLY VERTICAL HISTOGRAM
-    # ==========================================
+    # --- CHART ---
     fig = go.Figure()
 
+    # Wir plotten jetzt die SKALIERTEN Werte (damit sie sauber nebeneinander aussehen)
+    # Der Hover-Text (customdata) zeigt aber die ECHTEN, unskalierten Werte an!
     if showGex:
-        fig.add_trace(go.Bar(x=summary['strike'], y=summary['gex_normal'], name='🟠 GEX Normal (Gamma Exposure)', marker_color='#ff9800'))
+        fig.add_trace(go.Bar(x=summary['strike'], y=summary['gex_norm_scaled'], customdata=summary['gex_normal'], hovertemplate='Strike: %{x}<br>GEX Normal: %{customdata:,.0f}<extra></extra>', name='🟠 GEX Normal', marker_color='#ff9800'))
     if showGexVol:
-        fig.add_trace(go.Bar(x=summary['strike'], y=summary['gex_volume'], name='🩵 GEX Volume (Orderflow)', marker_color='#00bcd4'))
+        fig.add_trace(go.Bar(x=summary['strike'], y=summary['gex_vol_scaled'], customdata=summary['gex_volume'], hovertemplate='Strike: %{x}<br>GEX Vol: %{customdata:,.0f}<extra></extra>', name='🩵 GEX Volume', marker_color='#00bcd4'))
     if showDex:
-        fig.add_trace(go.Bar(x=summary['strike'], y=summary['dex_val'], name='🟣 DEX (Delta Exposure)', marker_color='#ab47bc'))
+        fig.add_trace(go.Bar(x=summary['strike'], y=summary['dex_val_scaled'], customdata=summary['dex_val'], hovertemplate='Strike: %{x}<br>DEX (Mio): %{customdata:,.2f}<extra></extra>', name='🟣 DEX Exposure', marker_color='#ab47bc'))
     if showOi:
-        fig.add_trace(go.Bar(x=summary['strike'], y=summary['oi_val'], name='🟡 Open Interest (Contracts)', marker_color='#ffeb3b'))
+        fig.add_trace(go.Bar(x=summary['strike'], y=summary['oi_val_scaled'], customdata=summary['oi_val'], hovertemplate='Strike: %{x}<br>Open Interest: %{customdata:,.0f}<extra></extra>', name='🟡 Open Interest', marker_color='#ffeb3b'))
 
-    # Vertikale Linien für Key Levels
     v_lines = [
         (spot, "SPOT", "#ffffff", "solid", 2),
         (gammaFlip, "GAMMA FLIP", "#ffeb3b", "solid", 3),
         (callWallIntra, "Intraday Call Wall", "#ff5252", "dot", 2),
         (putWallIntra, "Intraday Put Wall", "#66bb6a", "dot", 2),
-        (maxPain, "Max Pain Pin", "#ab47bc", "dash", 2),
+        (maxPain, "Max Pain", "#ab47bc", "dash", 2),
     ]
 
     if showDailyMove:
@@ -215,23 +193,13 @@ try:
         ])
 
     for x_val, name, color, style, width in v_lines:
-        fig.add_vline(
-            x=x_val, line_dash=style, line_color=color, line_width=width,
-            annotation_text=f"{name} (${x_val:,.0f})", 
-            annotation_position="top",
-            annotation_font_color=color,
-            annotation_font_size=10
-        )
+        fig.add_vline(x=x_val, line_dash=style, line_color=color, line_width=width, annotation_text=f"{name} (${x_val:,.0f})", annotation_position="top", annotation_font_color=color, annotation_font_size=10)
 
     fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor='#0b0e14',
-        plot_bgcolor='#11141d',
-        height=750,
-        barmode='group',
+        template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#11141d', height=750, barmode='group',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor='rgba(0,0,0,0)'),
         xaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)", gridcolor="#21262d"),
-        yaxis=dict(title="Exposure / Volume Value", gridcolor="#21262d"),
+        yaxis=dict(title="Scaled Profile Value (Visual Only)", gridcolor="#21262d", showticklabels=False), # Y-Achsen Labels versteckt, da skaliert
         margin=dict(l=40, r=40, t=50, b=40)
     )
 

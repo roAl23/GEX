@@ -6,26 +6,31 @@ import time
 from scipy.stats import norm
 import plotly.graph_objects as go
 
-# Layout auf Wide stellen
-st.set_page_config(page_title="Deribit Options Terminal", layout="wide")
+# 1. Page Config (Full Width)
+st.set_page_config(
+    page_title="Deribit Options Profile Terminal",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# --- CUSTOM CSS FÜR PREMIUM TERMINAL LOOK ---
+# --- CUSTOM CSS FÜR TERMINAL OPTIK ---
 st.markdown("""
     <style>
-    .stApp { background-color: #0e1117; color: #fafafa; }
-    .metric-card {
+    .stApp { background-color: #0b0e14; color: #e6edf3; }
+    .sidebar .st-content { background-color: #11141d; }
+    div.stMetric {
         background-color: #161b22;
         border: 1px solid #30363d;
-        padding: 15px;
-        border-radius: 8px;
-        text-align: center;
+        padding: 12px;
+        border-radius: 6px;
     }
+    div.stMetric label { color: #8b949e !important; }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ Deribit Options Profile Engine")
+st.markdown("### ⚡ Deribit Options Profile Engine & Key Levels")
 
-# --- BLACK-SCHOLES BERECHNUNG ---
+# --- BLACK-SCHOLES GREEKS ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
     if t_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
         return 0.0, 0.0, 0.5
@@ -36,8 +41,11 @@ def calculate_greeks(spot, strike, t_years, iv, option_type):
 
 @st.cache_data(ttl=15)
 def get_btc_spot():
-    url = "https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd"
-    return requests.get(url).json()['result']['index_price']
+    try:
+        url = "https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd"
+        return requests.get(url).json()['result']['index_price']
+    except:
+        return 85000.0  # Fallback falls API klemmt
 
 @st.cache_data(ttl=30)
 def get_option_data():
@@ -76,19 +84,21 @@ try:
     df_raw['gamma'] = gammas
     df_raw['delta'] = deltas
 
-    # SIDEBAR
-    st.sidebar.markdown("### 🎛️ Profil-Steuerung")
+    # --- SIDEBAR KONTROLLEN ---
+    st.sidebar.markdown("### 🎛️ Profil-Auswahl")
     show_gex    = st.sidebar.checkbox("🟠 GEX Normal (Gamma OI)", value=True)
     show_gex_vol = st.sidebar.checkbox("🩵 GEX Volume (Orderflow)", value=True)
     show_dex    = st.sidebar.checkbox("🟣 DEX (Delta Exposure)", value=True)
     show_oi     = st.sidebar.checkbox("🟡 Open Interest (Contracts)", value=True)
 
+    st.sidebar.markdown("---")
     expirations = sorted(df_raw['expiration_str'].unique().tolist())
     selected_exp = st.sidebar.selectbox("🗓️ Expiry Filter", ["ALL (Aggregated)"] + expirations)
-    zoom_margin = st.sidebar.slider("📐 Zoom Range (± USD)", 1000, 10000, 4000, step=500)
+    zoom_margin = st.sidebar.slider("📐 Zoom Range (± USD um Spot)", 1000, 15000, 4000, step=500)
 
     df = df_raw if selected_exp == "ALL (Aggregated)" else df_raw[df_raw['expiration_str'] == selected_exp]
 
+    # Metriken berechnen
     df['gex_normal'] = np.where(df['type'] == 'Call', df['gamma'] * df['open_interest'] * spot, -df['gamma'] * df['open_interest'] * spot) / 1e6
     df['gex_volume'] = np.where(df['type'] == 'Call', df['gamma'] * df['volume'] * spot, -df['gamma'] * df['volume'] * spot) / 1e6
     df['dex_val']    = df['delta'] * df['open_interest'] * spot / 1e6
@@ -115,57 +125,64 @@ try:
     atm_iv = (matching_iv[0] / 100.0) if len(matching_iv) > 0 and not np.isnan(matching_iv[0]) else 0.55
     exp_move_1sd = spot * atm_iv * np.sqrt(1 / 365.0)
 
-    # Clean Metrics Row
+    # --- TOP METRIC ROW ---
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("BTC Spot", f"${spot:,.1f}")
     m2.metric("Gamma Flip", f"${gamma_flip:,.0f}")
-    m3.metric("Intraday Call Wall", f"${call_wall:,.0f}")
-    m4.metric("Intraday Put Wall", f"${put_wall:,.0f}")
-    m5.metric("Max Pain Pin", f"${max_pain:,.0f}")
+    m3.metric("Call Wall", f"${call_wall:,.0f}")
+    m4.metric("Put Wall", f"${put_wall:,.0f}")
+    m5.metric("Max Pain", f"${max_pain:,.0f}")
     m6.metric("±1 SD Move", f"±${exp_move_1sd:,.0f}")
 
-    st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- PLOTLY PROFIL-DIAGRAMM (CLEAN & MODERN) ---
+    # --- PLOTLY PROFIL DIAGRAMM ---
     fig = go.Figure()
 
     if show_gex:
-        fig.add_trace(go.Bar(x=summary['gex_normal'], y=summary['strike'], orientation='h', name='GEX Normal', marker_color='#FF9800'))
+        fig.add_trace(go.Bar(x=summary['gex_normal'], y=summary['strike'], orientation='h', name='GEX Normal', marker_color='#ff9800'))
     if show_gex_vol:
-        fig.add_trace(go.Bar(x=summary['gex_volume'], y=summary['strike'], orientation='h', name='GEX Volume', marker_color='#00BCD4'))
+        fig.add_trace(go.Bar(x=summary['gex_volume'], y=summary['strike'], orientation='h', name='GEX Volume', marker_color='#00bcd4'))
     if show_dex:
-        fig.add_trace(go.Bar(x=summary['dex_val'], y=summary['strike'], orientation='h', name='DEX', marker_color='#AB47BC'))
+        fig.add_trace(go.Bar(x=summary['dex_val'], y=summary['strike'], orientation='h', name='DEX', marker_color='#ab47bc'))
     if show_oi:
-        fig.add_trace(go.Bar(x=summary['oi_val'], y=summary['strike'], orientation='h', name='Open Interest', marker_color='#FFEE58'))
+        fig.add_trace(go.Bar(x=summary['oi_val'], y=summary['strike'], orientation='h', name='Open Interest', marker_color='#ffeb3b'))
 
+    # Linien sauber einzeichnen
     levels = [
         (spot, "SPOT", "#ffffff", "solid", 2),
         (gamma_flip, "GAMMA FLIP", "#ffeb3b", "solid", 3),
         (call_wall, "Call Wall", "#ff5252", "dot", 2),
         (put_wall, "Put Wall", "#66bb6a", "dot", 2),
-        (max_pain, "Max Pain", "#ab47bc", "dash", 2),
+        (max_pain, "Max Pain Pin", "#ab47bc", "dash", 2),
         (spot + exp_move_1sd, "+1 SD Upper", "#ffa726", "dash", 1),
         (spot - exp_move_1sd, "-1 SD Lower", "#ffa726", "dash", 1),
+        (spot + (2 * exp_move_1sd), "+2 SD Upper", "#f06292", "dash", 1),
+        (spot - (2 * exp_move_1sd), "-2 SD Lower", "#f06292", "dash", 1),
     ]
 
     for price, name, color, style, width in levels:
-        fig.add_hline(y=price, line_dash=style, line_color=color, line_width=width,
-                      annotation_text=f"  {name}: ${price:,.0f}", annotation_position="top right",
-                      annotation_font_color=color)
+        fig.add_hline(
+            y=price, line_dash=style, line_color=color, line_width=width,
+            annotation_text=f"  {name}: ${price:,.0f}", 
+            annotation_position="top right",
+            annotation_font_color=color,
+            annotation_font_size=11
+        )
 
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor='#0e1117',
-        plot_bgcolor='#161b22',
-        height=800,
+        paper_bgcolor='#0b0e14',
+        plot_bgcolor='#11141d',
+        height=820,
         barmode='group',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor='rgba(0,0,0,0)'),
-        yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)", gridcolor="#30363d"),
-        xaxis=dict(title="Metric Exposure Value", gridcolor="#30363d"),
+        yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)", gridcolor="#21262d"),
+        xaxis=dict(title="Volume / Exposure Value", gridcolor="#21262d"),
         margin=dict(l=40, r=40, t=40, b=40)
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
-    st.error(f"Fehler: {e}")
+    st.error(f"Fehler beim Verarbeiten der Daten: {e}")

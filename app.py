@@ -5,24 +5,22 @@ import numpy as np
 import time
 from scipy.stats import norm
 import plotly.graph_objects as go
+from streamlit_lightweight_charts import renderLightweightCharts
 
-st.set_page_config(page_title="Deribit GEX Pro Dashboard", layout="wide")
+st.set_page_config(page_title="Deribit Options Profile Engine Pro", layout="wide")
 
-st.title("📈 BTC TradingView & Options GEX/DEX Analytics Suite")
+st.title("📈 Deribit Options Profile Engine + Min/Max Daily Move")
 
 # --- BLACK-SCHOLES BERECHNUNG FÜR GAMMA & DELTA ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
     if t_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
         return 0.0, 0.0
-    
     d1 = (np.log(spot / strike) + (0.5 * iv**2) * t_years) / (iv * np.sqrt(t_years))
     gamma = norm.pdf(d1) / (spot * iv * np.sqrt(t_years))
-    
     if option_type == 'Call':
         delta = norm.cdf(d1)
     else:
         delta = norm.cdf(d1) - 1.0
-        
     return gamma, delta
 
 # 1. Spot Price
@@ -39,9 +37,8 @@ def get_btc_candles(resolution="60"):
     start_time = end_time - (72 * 60 * 60 * 1000)
     url = f"https://www.deribit.com/api/v2/public/get_tradingview_chart_data?instrument_name=BTC-PERPETUAL&start_timestamp={start_time}&end_timestamp={end_time}&resolution={resolution}"
     res = requests.get(url).json()['result']
-    
     df = pd.DataFrame({
-        'ticks': pd.to_datetime(res['ticks'], unit='ms'),
+        'time': [t // 1000 for t in res['ticks']],
         'open': res['open'],
         'high': res['high'],
         'low': res['low'],
@@ -71,7 +68,7 @@ try:
         if col in df_raw.columns:
             df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
 
-    # Restlaufzeit in Jahren berechnen
+    # Restlaufzeit in Jahren
     current_time = time.time()
     def parse_expiration_years(exp_str):
         try:
@@ -100,34 +97,49 @@ try:
     df_raw['gamma'] = gammas
     df_raw['delta'] = deltas
 
-    # SIDEBAR FILTER
-    st.sidebar.header("🗓️ Filter Options")
+    # SIDEBAR: Checkboxen wie im Pine Script
+    st.sidebar.header("🎛️ Profile Selection")
+    show_gex_normal = st.sidebar.checkbox("🟠 Show GEX Normal (Gamma OI)", value=True)
+    show_gex_vol    = st.sidebar.checkbox("🩵 Show GEX Volume (Orderflow)", value=True)
+    show_dex        = st.sidebar.checkbox("🟣 Show DEX (Delta Exposure)", value=True)
+    show_oi         = st.sidebar.checkbox("🟡 Show Open Interest (Contracts)", value=True)
+
+    st.sidebar.header("🗓️ Filter Expiration")
     expirations = sorted(df_raw['expiration_str'].unique().tolist())
-    selected_exp = st.sidebar.selectbox("Select Expiration Date", ["ALL (Aggregated)"] + expirations, index=0)
+    selected_exp = st.sidebar.selectbox("Select Expiration", ["ALL (Aggregated)"] + expirations, index=0)
 
     if selected_exp != "ALL (Aggregated)":
         df = df_raw[df_raw['expiration_str'] == selected_exp].copy()
     else:
         df = df_raw.copy()
 
-    # Kennzahlen Berechnungen
-    df['gex_oi'] = np.where(df['type'] == 'Call', df['gamma'] * df['open_interest'] * spot, -df['gamma'] * df['open_interest'] * spot) / 1e6
-    df['dex'] = df['delta'] * df['open_interest'] * spot / 1e6
+    # Metriken berechnen
+    df['gex_normal'] = np.where(df['type'] == 'Call', df['gamma'] * df['open_interest'] * spot, -df['gamma'] * df['open_interest'] * spot) / 1e6
+    df['gex_volume'] = np.where(df['type'] == 'Call', df['gamma'] * df['volume'] * spot, -df['gamma'] * df['volume'] * spot) / 1e6
+    df['dex_val']    = df['delta'] * df['open_interest'] * spot / 1e6
+    df['oi_val']     = df['open_interest'] / 1000.0 # in Tausend Contracts
 
-    zoom_margin = 3500
-    y_min, y_max = spot - zoom_margin, spot + zoom_margin
+    zoom_range = 3500
+    y_min, y_max = spot - zoom_range, spot + zoom_range
     df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)].copy()
 
-    summary = df_filtered.groupby('strike').agg({'gex_oi': 'sum', 'dex': 'sum', 'open_interest': 'sum'}).reset_index()
+    summary = df_filtered.groupby('strike').agg({
+        'gex_normal': 'sum',
+        'gex_volume': 'sum',
+        'dex_val': 'sum',
+        'oi_val': 'sum'
+    }).reset_index()
+
+    # Key Levels & Expected Move
     summary_sorted = summary.sort_values('strike').copy()
-    summary_sorted['cum_gex'] = summary_sorted['gex_oi'].cumsum()
+    summary_sorted['cum_gex'] = summary_sorted['gex_normal'].cumsum()
     zero_crossings = summary_sorted[np.sign(summary_sorted['cum_gex']).diff() != 0]
     gamma_flip = zero_crossings['strike'].iloc[0] if len(zero_crossings) > 0 else spot
 
-    call_wall = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['gex_oi'].sum().idxmax() if not df_filtered.empty else spot
-    put_wall = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['gex_oi'].sum().abs().idxmax() if not df_filtered.empty else spot
+    call_wall = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['gex_normal'].sum().idxmax() if not df_filtered.empty else spot
+    put_wall  = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['gex_normal'].sum().abs().idxmax() if not df_filtered.empty else spot
 
-    # ATM IV & Expected Move (1 SD / 2 SD)
+    # ATM IV & Expected Moves (±1 SD / ±2 SD)
     atm_strike = summary_sorted.iloc[(summary_sorted['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not summary_sorted.empty else spot
     matching_iv = df_filtered[df_filtered['strike'] == atm_strike]['mark_iv'].mean()
     atm_iv = (matching_iv / 100.0) if not np.isnan(matching_iv) and matching_iv > 0 else 0.55
@@ -136,7 +148,7 @@ try:
     min_upper, min_lower = spot + exp_move_1sd, spot - exp_move_1sd
     max_upper, max_lower = spot + (2 * exp_move_1sd), spot - (2 * exp_move_1sd)
 
-    # Top Metrics Header
+    # Top Metrics Bar
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("BTC Spot", f"${spot:,.1f}")
     m2.metric("Gamma Flip", f"${gamma_flip:,.0f}")
@@ -146,12 +158,65 @@ try:
 
     st.markdown("---")
 
-    # LAYOUT: 3 Spalten (Kerzenchart | GEX Profile | DEX Profile)
-    col_chart, col_gex, col_dex = st.columns([0.48, 0.26, 0.26])
+    # LAYOUT: Links TradingView Chart | Rechts Die 4 Balken-Profile nebeneinander
+    col_tv, col_profiles = st.columns([0.45, 0.55])
 
-    # Gemeinsame Linien-Funktion für den Kerzenchart
-    def add_standard_lines(fig):
-        lines = [
+    with col_tv:
+        st.subheader("📺 TradingView Perpetual Chart")
+        candle_data = candles[['time', 'open', 'high', 'low', 'close']].to_dict('records')
+        volume_data = candles[['time', 'volume', 'open', 'close']].copy()
+        volume_data['color'] = np.where(volume_data['close'] >= volume_data['open'], 'rgba(38, 166, 154, 0.5)', 'rgba(239, 83, 80, 0.5)')
+        volume_data = volume_data.rename(columns={'volume': 'value'}).drop(columns=['open', 'close']).to_dict('records')
+
+        chart_options = {
+            "height": 700,
+            "layout": {"background": {"type": "solid", "color": "#131722"}, "textColor": "#d1d4dc"},
+            "grid": {"vertLines": {"color": "#2B2B43"}, "horzLines": {"color": "#2B2B43"}},
+            "crosshair": {"mode": 0},
+            "priceScale": {"borderColor": "#555"},
+            "timeScale": {"borderColor": "#555", "timeVisible": True}
+        }
+        series_candlestick = [{
+            "type": "Candlestick",
+            "data": candle_data,
+            "options": {"upColor": "#26a69a", "downColor": "#ef5350", "borderVisible": False}
+        }, {
+            "type": "Histogram",
+            "data": volume_data,
+            "options": {"priceFormat": {"type": "volume"}, "priceScaleId": ""},
+            "priceScale": {"scaleMargins": {"top": 0.8, "bottom": 0}}
+        }]
+        renderLightweightCharts([{"chart": chart_options, "series": series_candlestick}], key="tv_main_chart")
+
+    with col_profiles:
+        st.subheader(f"📊 Side-by-Side Profiles ({selected_exp})")
+        
+        # Plotly Subplots für die aktivierten Profile nebeneinander
+        fig = go.Figure()
+
+        if show_gex_normal:
+            fig.add_trace(go.Bar(
+                x=summary['gex_normal'], y=summary['strike'], orientation='h',
+                name='GEX Normal', marker_color='#FF9800'
+            ))
+        if show_gex_vol:
+            fig.add_trace(go.Bar(
+                x=summary['gex_volume'], y=summary['strike'], orientation='h',
+                name='GEX Volume', marker_color='#00BCD4'
+            ))
+        if show_dex:
+            fig.add_trace(go.Bar(
+                x=summary['dex_val'], y=summary['strike'], orientation='h',
+                name='DEX', marker_color='#9C27B0'
+            ))
+        if show_oi:
+            fig.add_trace(go.Bar(
+                x=summary['oi_val'], y=summary['strike'], orientation='h',
+                name='Open Interest', marker_color='#FFEB3B'
+            ))
+
+        # Linien für Key Levels und Expected Move einzeichnen
+        levels = [
             (spot, "SPOT", "white", "solid"),
             (gamma_flip, "GAMMA FLIP", "yellow", "solid"),
             (min_upper, "+1 SD", "orange", "dash"),
@@ -161,63 +226,20 @@ try:
             (call_wall, "Call Wall", "red", "dot"),
             (put_wall, "Put Wall", "green", "dot")
         ]
-        for price, name, color, style in lines:
+        for price, name, color, style in levels:
             fig.add_hline(y=price, line_dash=style, line_color=color, annotation_text=f"{name} ({price:,.0f})")
 
-    # 1. Kerzenchart (Linke Spalte)
-    with col_chart:
-        st.subheader("📊 BTC Perpetual 1H & Key Levels")
-        fig_candle = go.Figure()
-        fig_candle.add_trace(go.Candlestick(
-            x=candles['ticks'], open=candles['open'], high=candles['high'], low=candles['low'], close=candles['close'], name="BTC"
-        ))
-        
-        # VPVR Volumenprofil als Overlay
-        nbins = 25
-        price_bins = pd.cut(candles['close'], bins=nbins)
-        vpvr = candles.groupby(price_bins, observed=False)['volume'].sum().reset_index()
-        vpvr['bin_mid'] = vpvr['close'].apply(lambda x: x.mid)
-        
-        fig_candle.add_trace(go.Bar(
-            x=vpvr['volume'], y=vpvr['bin_mid'], orientation='h', name="Volume", marker_color='rgba(255,255,255,0.1)', width=150
-        ))
-
-        add_standard_lines(fig_candle)
-        fig_candle.update_layout(
-            template="plotly_dark", height=700, showlegend=False, xaxis_rangeslider_visible=False,
-            yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Preis ($)")
+        fig.update_layout(
+            template="plotly_dark",
+            height=700,
+            barmode='group',
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)"),
+            xaxis=dict(title="Exposure / Volume Value"),
+            margin=dict(l=10, r=10, t=30, b=10)
         )
-        st.plotly_chart(fig_candle, use_container_width=True)
-
-    # 2. GEX Profile (Mittlere Spalte)
-    with col_gex:
-        st.subheader(f"🟠 GEX ({selected_exp})")
-        colors_gex = ['#00E676' if x >= 0 else '#FF5252' for x in summary['gex_oi']]
-        
-        fig_gex = go.Figure()
-        fig_gex.add_trace(go.Bar(x=summary['gex_oi'], y=summary['strike'], orientation='h', marker_color=colors_gex, width=200))
-        add_standard_lines(fig_gex)
-        
-        fig_gex.update_layout(
-            template="plotly_dark", height=700, showlegend=False,
-            yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", showticklabels=False),
-            xaxis=dict(title="GEX ($M)")
-        )
-        st.plotly_chart(fig_gex, use_container_width=True)
-
-    # 3. DEX Profile (Rechte Spalte)
-    with col_dex:
-        st.subheader("🟣 DEX Profile")
-        fig_dex = go.Figure()
-        fig_dex.add_trace(go.Bar(x=summary['dex'], y=summary['strike'], orientation='h', marker_color='#AB47BC', width=200))
-        add_standard_lines(fig_dex)
-        
-        fig_dex.update_layout(
-            template="plotly_dark", height=700, showlegend=False,
-            yaxis=dict(range=[y_min, y_max], tickformat="$,.0f", showticklabels=False),
-            xaxis=dict(title="DEX ($M)")
-        )
-        st.plotly_chart(fig_dex, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
     st.error(f"Fehler beim Laden des Dashboards: {e}")

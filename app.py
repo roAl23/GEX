@@ -62,10 +62,14 @@ try:
             df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
 
     current_time = time.time()
-    def parse_expiration_years(exp_str):
+   def parse_expiration_years(exp_str):
         try:
-            exp_date = pd.to_datetime(exp_str, format='%d%b%y')
-            return max(exp_date.timestamp() + 28800 - current_time, 3600) / (365.25 * 86400)
+            # 1. Datum parsen und hart auf UTC fixieren
+            exp_date = pd.to_datetime(exp_str, format='%d%b%y').tz_localize('UTC')
+            # 2. Exakt 8 Stunden addieren (Deribit Verfall ist 08:00 UTC)
+            expiry_timestamp = exp_date.timestamp() + (8 * 3600)
+            # 3. Restlaufzeit berechnen (Sicherheitsnetz: minimal 1 Stunde)
+            return max(expiry_timestamp - current_time, 3600) / (365.25 * 86400)
         except:
             return 1.0 / 365.25
 
@@ -148,11 +152,13 @@ try:
     pains = [np.where(s > strike_arr, (s - strike_arr) * call_oi_arr, 0).sum() + np.where(strike_arr > s, (strike_arr - s) * put_oi_arr, 0).sum() for s in strike_arr]
     maxPain = strike_arr[np.argmin(pains)] if len(pains) > 0 else spot
 
-    # --- SESSION STATE TRACKING ---
+    # --- SESSION STATE TRACKING (KORRIGIERT) ---
     current_oi_dict = summary.set_index('strike')['oi_val'].to_dict()
     
-    if 'initialized' not in st.session_state:
+    # Neu: Wir checken, ob der Expiry-Filter gewechselt wurde!
+    if 'initialized' not in st.session_state or st.session_state.get('last_exp') != selected_exp:
         st.session_state['initialized'] = True
+        st.session_state['last_exp'] = selected_exp # Filter-Status merken
         st.session_state['prev_net_gamma'] = summary['gex_normal'].sum()
         st.session_state['prev_gamma_flip'] = gammaFlip
         st.session_state['prev_oi'] = current_oi_dict

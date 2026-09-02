@@ -11,16 +11,16 @@ st.set_page_config(page_title="Deribit Options Profile Engine Pro", layout="wide
 
 # --- CSS FÜR TERMINAL OPTIK ---
 st.markdown("""
-    <style>
-    .stApp { background-color: #0b0e14; color: #e6edf3; }
-    div.stMetric {
-        background-color: #161b22;
-        border: 1px solid #30363d;
-        padding: 10px;
-        border-radius: 6px;
-    }
-    div.stMetric label { color: #8b949e !important; }
-    </style>
+<style>
+.stApp { background-color: #0b0e14; color: #e6edf3; }
+div.stMetric {
+    background-color: #161b22;
+    border: 1px solid #30363d;
+    padding: 10px;
+    border-radius: 6px;
+}
+div.stMetric label { color: #8b949e !important; }
+</style>
 """, unsafe_allow_html=True)
 
 st.markdown("### 📊 Deribit Options Profile Engine (Live API + Flow)")
@@ -178,43 +178,41 @@ try:
     pc_ratio = (total_put_oi / total_call_oi) if total_call_oi > 0 else 0.0
 
     # ==========================================
-    # SIDEBAR TABELLEN (Market Overview & 24h Flow)
+    # SIDEBAR TABELLEN (Linksbuendig formatiert)
     # ==========================================
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📋 Market Overview")
     
-    sidebar_table_html = f"""
-    <table style="width:100%; border-collapse: collapse; font-size: 13px; text-align: left; color: #e6edf3;">
-        <tr style="border-bottom: 1px solid #30363d;">
-            <th style="padding: 6px 0;">Metrik</th>
-            <th style="padding: 6px 0; text-align: right;">Wert</th>
-        </tr>
-        <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 6px 0; color: #8b949e;">Net GEX (Mio. $)</td>
-            <td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f}</td>
-        </tr>
-        <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 6px 0; color: #8b949e;">Net VEX (Mio. $)</td>
-            <td style="padding: 6px 0; text-align: right;">{net_vex:,.2f}</td>
-        </tr>
-        <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 6px 0; color: #8b949e;">Regime</td>
-            <td style="padding: 6px 0; text-align: right;">{gamma_regime}</td>
-        </tr>
-        <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 6px 0; color: #8b949e;">P/C Ratio</td>
-            <td style="padding: 6px 0; text-align: right;">{pc_ratio:.2f}</td>
-        </tr>
-        <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 6px 0; color: #8b949e;">Max Pain</td>
-            <td style="padding: 6px 0; text-align: right;">${maxPain:,.0f}</td>
-        </tr>
-        <tr>
-            <td style="padding: 6px 0; color: #8b949e;">Gamma Flip</td>
-            <td style="padding: 6px 0; text-align: right;">${gammaFlip:,.0f}</td>
-        </tr>
-    </table>
-    """
+    sidebar_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 13px; text-align: left; color: #e6edf3;">
+<tr style="border-bottom: 1px solid #30363d;">
+<th style="padding: 6px 0;">Metrik</th>
+<th style="padding: 6px 0; text-align: right;">Wert</th>
+</tr>
+<tr style="border-bottom: 1px solid #30363d;">
+<td style="padding: 6px 0; color: #8b949e;">Net GEX (Mio. $)</td>
+<td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f}</td>
+</tr>
+<tr style="border-bottom: 1px solid #30363d;">
+<td style="padding: 6px 0; color: #8b949e;">Net VEX (Mio. $)</td>
+<td style="padding: 6px 0; text-align: right;">{net_vex:,.2f}</td>
+</tr>
+<tr style="border-bottom: 1px solid #30363d;">
+<td style="padding: 6px 0; color: #8b949e;">Regime</td>
+<td style="padding: 6px 0; text-align: right;">{gamma_regime}</td>
+</tr>
+<tr style="border-bottom: 1px solid #30363d;">
+<td style="padding: 6px 0; color: #8b949e;">P/C Ratio</td>
+<td style="padding: 6px 0; text-align: right;">{pc_ratio:.2f}</td>
+</tr>
+<tr style="border-bottom: 1px solid #30363d;">
+<td style="padding: 6px 0; color: #8b949e;">Max Pain</td>
+<td style="padding: 6px 0; text-align: right;">${maxPain:,.0f}</td>
+</tr>
+<tr>
+<td style="padding: 6px 0; color: #8b949e;">Gamma Flip</td>
+<td style="padding: 6px 0; text-align: right;">${gammaFlip:,.0f}</td>
+</tr>
+</table>"""
     st.sidebar.markdown(sidebar_table_html, unsafe_allow_html=True)
 
     # --- TOP 24H FLOW / OI VELOCITY SECTION ---
@@ -222,27 +220,23 @@ try:
     st.sidebar.markdown("### 🔥 Top 24h Flow (Volume Velocity)")
     st.sidebar.caption("Strikes mit dem höchsten heutigen Handelsvolumen:")
     
-    # Finde die Top 4 Strikes nach Volumen
     top_volume_strikes = summary.sort_values('volume', ascending=False).head(4)
     
     flow_rows = ""
     for _, row in top_volume_strikes.iterrows():
-        flow_rows += f"""
-        <tr style="border-bottom: 1px solid #21262d;">
-            <td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td>
-            <td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td>
-        </tr>
-        """
+        flow_rows += f"""<tr style="border-bottom: 1px solid #21262d;">
+<td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td>
+<td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td>
+</tr>
+"""
     
-    flow_table_html = f"""
-    <table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;">
-        <tr style="border-bottom: 1px solid #30363d;">
-            <th style="padding: 5px 0; color: #8b949e;">Strike</th>
-            <th style="padding: 5px 0; text-align: right; color: #8b949e;">24h Vol</th>
-        </tr>
-        {flow_rows}
-    </table>
-    """
+    flow_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;">
+<tr style="border-bottom: 1px solid #30363d;">
+<th style="padding: 5px 0; color: #8b949e;">Strike</th>
+<th style="padding: 5px 0; text-align: right; color: #8b949e;">24h Vol</th>
+</tr>
+{flow_rows}
+</table>"""
     st.sidebar.markdown(flow_table_html, unsafe_allow_html=True)
 
     # --- TOP METRICS ---

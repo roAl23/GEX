@@ -62,7 +62,8 @@ try:
             df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
 
     current_time = time.time()
-   def parse_expiration_years(exp_str):
+    
+    def parse_expiration_years(exp_str):
         try:
             # 1. Datum parsen und hart auf UTC fixieren
             exp_date = pd.to_datetime(exp_str, format='%d%b%y').tz_localize('UTC')
@@ -152,13 +153,12 @@ try:
     pains = [np.where(s > strike_arr, (s - strike_arr) * call_oi_arr, 0).sum() + np.where(strike_arr > s, (strike_arr - s) * put_oi_arr, 0).sum() for s in strike_arr]
     maxPain = strike_arr[np.argmin(pains)] if len(pains) > 0 else spot
 
-    # --- SESSION STATE TRACKING (KORRIGIERT) ---
+    # --- SESSION STATE TRACKING (KORRIGIERT: Filter-Reset) ---
     current_oi_dict = summary.set_index('strike')['oi_val'].to_dict()
     
-    # Neu: Wir checken, ob der Expiry-Filter gewechselt wurde!
     if 'initialized' not in st.session_state or st.session_state.get('last_exp') != selected_exp:
         st.session_state['initialized'] = True
-        st.session_state['last_exp'] = selected_exp # Filter-Status merken
+        st.session_state['last_exp'] = selected_exp
         st.session_state['prev_net_gamma'] = summary['gex_normal'].sum()
         st.session_state['prev_gamma_flip'] = gammaFlip
         st.session_state['prev_oi'] = current_oi_dict
@@ -216,7 +216,7 @@ try:
     sidebar_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 13px; text-align: left; color: #e6edf3;">
 <tr style="border-bottom: 1px solid #30363d;"><th style="padding: 6px 0;">Metrik</th><th style="padding: 6px 0; text-align: right;">Wert</th></tr>
 <tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Net GEX</td><td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f} Mio. $</td></tr>
-<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">24h GEX Momentum</td><td style="padding: 6px 0; text-align: right;">{gex_arrow} {gex_momentum:+,.2f}</td></tr>
+<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Session Momentum</td><td style="padding: 6px 0; text-align: right;">{gex_arrow} {gex_momentum:+,.2f}</td></tr>
 <tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Net VEX (Vega Risk)</td><td style="padding: 6px 0; text-align: right;">{net_vex:,.2f} Mio. $</td></tr>
 <tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Regime</td><td style="padding: 6px 0; text-align: right;">{gamma_regime}</td></tr>
 <tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">P/C Ratio</td><td style="padding: 6px 0; text-align: right;">{pc_ratio:.2f}</td></tr>
@@ -226,7 +226,7 @@ try:
     st.sidebar.markdown(sidebar_table_html, unsafe_allow_html=True)
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚡ OI Velocity ($\Delta OI 24h$)")
+    st.sidebar.markdown("### ⚡ OI Velocity ($\Delta OI$)")
     if not df_oi_vel.empty:
         oi_rows = ""
         for _, row in df_oi_vel.iterrows():

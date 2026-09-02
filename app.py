@@ -357,3 +357,44 @@ try:
 
 except Exception as e:
     st.error(f"Fehler beim Verarbeiten der Daten: {e}")
+
+# ==========================================
+    # ZUSATZ: MULTI-EXPIRY HEATMAP (Strike vs. Expiry)
+    # ==========================================
+    st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
+    st.markdown("### 🔥 Multi-Expiry Open Interest Heatmap (Strike vs. Expiry)")
+    st.caption("Diese Matrix zeigt dir die Verteilung des Open Interests über alle Laufzeiten und Strikes gleichzeitig.")
+
+    # Pivot-Tabelle erstellen: Expiries als Zeilen, Strikes als Spalten
+    heatmap_data = df_raw.pivot_table(
+        index='expiration_str', 
+        columns='strike', 
+        values='open_interest', 
+        aggfunc='sum', 
+        fill_value=0
+    )
+
+    # Nur Strikes in der Nähe des Spots anzeigen, um die Heatmap übersichtlich zu halten (z.B. ± 30.000$)
+    valid_strikes = [s for s in heatmap_data.columns if spot - 30000 <= s <= spot + 30000]
+    heatmap_filtered = heatmap_data[valid_strikes]
+
+    fig_heat = go.Figure(data=go.Heatmap(
+        z=heatmap_filtered.values,
+        x=heatmap_filtered.columns,
+        y=heatmap_filtered.index,
+        colorscale='Plasma', # Schöner Krypto-Terminal-Look (Plasma, Viridis oder Cividis)
+        hoverongaps = False,
+        hovertemplate='Expiry: %{y}<br>Strike: $%{x}<br>Open Interest: %{z:,.0f} Contracts<extra></extra>'
+    ))
+
+    fig_heat.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='#0b0e14',
+        plot_bgcolor='#11141d',
+        height=450,
+        xaxis=dict(title="Strike Price ($)", tickformat="$,.0f", gridcolor="#21262d"),
+        yaxis=dict(title="Expiry", gridcolor="#21262d"),
+        margin=dict(l=40, r=40, t=30, b=40)
+    )
+
+    st.plotly_chart(fig_heat, use_container_width=True)

@@ -23,16 +23,18 @@ div.stMetric label { color: #8b949e !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("### 📊 Deribit Options Profile Engine (Live API + Flow)")
+st.markdown("### 📊 Deribit Options Profile Engine (Live API + Advanced Flow)")
 
-# --- GREEKS BERECHNUNG ---
+# --- BLACK-SCHOLES GREEKS (Inklusive Vega & Vanna-Basis) ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
     if t_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
-        return 0.0, 0.0, 0.5
+        return 0.0, 0.0, 0.0, 0.5
     d1 = (np.log(spot / strike) + (0.5 * iv**2) * t_years) / (iv * np.sqrt(t_years))
     gamma = norm.pdf(d1) / (spot * iv * np.sqrt(t_years))
     delta = norm.cdf(d1) if option_type == 'Call' else norm.cdf(d1) - 1.0
-    return gamma, delta, norm.cdf(d1)
+    # Vega (Skaliert auf 1% Änderung der IV, d.h. geteilt durch 100)
+    vega = (spot * np.sqrt(t_years) * norm.pdf(d1)) / 100.0
+    return gamma, delta, vega, norm.cdf(d1)
 
 @st.cache_data(ttl=15)
 def get_btc_spot():
@@ -70,14 +72,16 @@ try:
 
     df_raw['t_years'] = df_raw['expiration_str'].apply(parse_expiration_years)
 
-    gammas, deltas = [], []
+    gammas, deltas, vegas = [], [], []
     for _, row in df_raw.iterrows():
-        g, d, _ = calculate_greeks(spot, row['strike'], row['t_years'], row['mark_iv'] / 100.0, row['type'])
+        g, d, v, _ = calculate_greeks(spot, row['strike'], row['t_years'], row['mark_iv'] / 100.0, row['type'])
         gammas.append(g)
         deltas.append(d)
+        vegas.append(v)
 
     df_raw['gamma'] = gammas
     df_raw['delta'] = deltas
+    df_raw['vega'] = vegas
 
     # --- SIDEBAR UI ---
     st.sidebar.markdown("### 🎛️ Profile Selection")
@@ -100,7 +104,7 @@ try:
     df = df_raw if selected_exp == "ALL (Aggregated)" else df_raw[df_raw['expiration_str'] == selected_exp]
 
     # ==========================================
-    # KORREKTE KENNZAHLEN LOGIK (The 1% GEX Rule)
+    # KENNZAHLEN LOGIK (1% GEX & VEX)
     # ==========================================
     contract_multiplier = 1.0  
     
@@ -112,6 +116,9 @@ try:
                                 df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01, 
                                 -df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01) / 1e6
                                 
+    # Vega Exposure (VEX) pro 1% Vola-Versatz in Mio. $
+    df['vex_val'] = (df['vega'] * df['open_interest'] * contract_multiplier * spot) / 1e6
+
     df['dex_val'] = (df['delta'] * df['open_interest'] * contract_multiplier * spot) / 1e6
     df['oi_val']  = df['open_interest']
 
@@ -119,7 +126,7 @@ try:
     df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)]
 
     summary = df_filtered.groupby('strike').agg({
-        'gex_normal': 'sum', 'gex_volume': 'sum', 'dex_val': 'sum', 'oi_val': 'sum', 'mark_iv': 'mean', 'volume': 'sum'
+        'gex_normal': 'sum', 'gex_volume': 'sum', 'vex_val': 'sum', 'dex_val': 'sum', 'oi_val': 'sum', 'mark_iv': 'mean', 'volume': 'sum'
     }).reset_index().sort_values('strike')
 
     # Visuelle Skalierung für den Chart
@@ -146,6 +153,44 @@ try:
     pains = [np.where(s > strike_arr, (s - strike_arr) * call_oi_arr, 0).sum() + np.where(strike_arr > s, (strike_arr - s) * put_oi_arr, 0).sum() for s in strike_arr]
     maxPain = strike_arr[np.argmin(pains)] if len(pains) > 0 else spot
 
+    # --- SESSION STATE TRACKING (Für 24h Momentum & Migration) ---
+    current_oi_dict = summary.set_index('strike')['oi_val'].to_dict()
+    
+    if 'initialized' not in st.session_state:
+        st.session_state['initialized'] = True
+        st.session_state['prev_net_gamma'] = summary['gex_normal'].sum()
+        st.session_state['prev_gamma_flip'] = gammaFlip
+        st.session_state['prev_oi'] = current_oi_dict
+
+    # Momentum Berechnungen
+    net_gamma = summary['gex_normal'].sum()
+    net_vex = summary['vex_val'].sum()
+    gamma_regime = "🟢 Positiv (Low Vol)" if net_gamma > 0 else "🔴 Negativ (High Vol)"
+    
+    # 1. Net GEX Momentum (Veränderung seit Start)
+    gex_momentum = net_gamma - st.session_state['prev_net_gamma']
+    gex_arrow = "🟢 ▲" if gex_momentum >= 0 else "🔴 ▼"
+
+    # 4. Gamma-Flip Migration (Wanderung)
+    flip_migration = gammaFlip - st.session_state['prev_gamma_flip']
+    flip_arrow = f"({'+' if flip_migration >= 0 else ''}{flip_migration:,.0f} $)" if flip_migration != 0 else "(Stable)"
+
+    # 2. Open Interest Velocity ($\Delta OI$) pro Strike berechnen
+    oi_velocity_rows = []
+    for strike, curr_oi in current_oi_dict.items():
+        prev_oi = st.session_state['prev_oi'].get(strike, curr_oi)
+        delta_oi = curr_oi - prev_oi
+        if delta_oi != 0:
+            oi_velocity_rows.append({'strike': strike, 'delta_oi': delta_oi})
+    
+    df_oi_vel = pd.DataFrame(oi_velocity_rows)
+    if not df_oi_vel.empty:
+        df_oi_vel = df_oi_vel.sort_values('delta_oi', ascending=False).head(4)
+
+    total_call_oi = summary['call_oi'].sum()
+    total_put_oi = summary['put_oi'].sum()
+    pc_ratio = (total_put_oi / total_call_oi) if total_call_oi > 0 else 0.0
+
     # --- EXPECTED MOVE (LOGNORMAL) ---
     atm_strike = summary.iloc[(summary['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not summary.empty else spot
     
@@ -168,20 +213,11 @@ try:
     
     exp_move_dollar = minMoveUpper - spot
 
-    # --- MACRO BERECHNUNGEN ---
-    net_gamma = summary['gex_normal'].sum()
-    net_vex = summary['gex_volume'].sum()
-    gamma_regime = "🟢 Positiv (Low Vol)" if net_gamma > 0 else "🔴 Negativ (High Vol)"
-    
-    total_call_oi = summary['call_oi'].sum()
-    total_put_oi = summary['put_oi'].sum()
-    pc_ratio = (total_put_oi / total_call_oi) if total_call_oi > 0 else 0.0
-
     # ==========================================
-    # SIDEBAR TABELLEN (Linksbuendig formatiert)
+    # SIDEBAR TABELLEN (Market Overview & Flow)
     # ==========================================
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📋 Market Overview")
+    st.sidebar.markdown("### 📋 Market Overview & Momentum")
     
     sidebar_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 13px; text-align: left; color: #e6edf3;">
 <tr style="border-bottom: 1px solid #30363d;">
@@ -189,12 +225,16 @@ try:
 <th style="padding: 6px 0; text-align: right;">Wert</th>
 </tr>
 <tr style="border-bottom: 1px solid #30363d;">
-<td style="padding: 6px 0; color: #8b949e;">Net GEX (Mio. $)</td>
-<td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f}</td>
+<td style="padding: 6px 0; color: #8b949e;">Net GEX</td>
+<td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f} Mio. $</td>
 </tr>
 <tr style="border-bottom: 1px solid #30363d;">
-<td style="padding: 6px 0; color: #8b949e;">Net VEX (Mio. $)</td>
-<td style="padding: 6px 0; text-align: right;">{net_vex:,.2f}</td>
+<td style="padding: 6px 0; color: #8b949e;">24h GEX Momentum</td>
+<td style="padding: 6px 0; text-align: right;">{gex_arrow} {gex_momentum:+,.2f}</td>
+</tr>
+<tr style="border-bottom: 1px solid #30363d;">
+<td style="padding: 6px 0; color: #8b949e;">Net VEX (Vega Risk)</td>
+<td style="padding: 6px 0; text-align: right;">{net_vex:,.2f} Mio. $</td>
 </tr>
 <tr style="border-bottom: 1px solid #30363d;">
 <td style="padding: 6px 0; color: #8b949e;">Regime</td>
@@ -209,18 +249,41 @@ try:
 <td style="padding: 6px 0; text-align: right;">${maxPain:,.0f}</td>
 </tr>
 <tr>
-<td style="padding: 6px 0; color: #8b949e;">Gamma Flip</td>
-<td style="padding: 6px 0; text-align: right;">${gammaFlip:,.0f}</td>
+<td style="padding: 6px 0; color: #8b949e;">Gamma Flip <br><span style="font-size:10px; color:#8b949e;">{flip_arrow}</span></td>
+<td style="padding: 6px 0; text-align: right; vertical-align: middle;">${gammaFlip:,.0f}</td>
 </tr>
 </table>"""
     st.sidebar.markdown(sidebar_table_html, unsafe_allow_html=True)
 
-    # --- TOP 24H FLOW / OI VELOCITY SECTION ---
+    # --- TOP 24H OI VELOCITY ($\Delta OI$) ---
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔥 Top 24h Flow (Volume Velocity)")
-    st.sidebar.caption("Strikes mit dem höchsten heutigen Handelsvolumen:")
+    st.sidebar.markdown("### ⚡ OI Velocity ($\Delta OI 24h$)")
+    st.sidebar.caption("Strikes mit dem größten Open-Interest-Zuwachs:")
     
-    top_volume_strikes = summary.sort_values('volume', ascending=False).head(4)
+    if not df_oi_vel.empty:
+        oi_rows = ""
+        for _, row in df_oi_vel.iterrows():
+            color_code = "#00e676" if row['delta_oi'] > 0 else "#ff5252"
+            oi_rows += f"""<tr style="border-bottom: 1px solid #21262d;">
+<td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td>
+<td style="padding: 5px 0; text-align: right; color: {color_code};">{row['delta_oi']:+,.1f}</td>
+</tr>
+"""
+        oi_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;">
+<tr style="border-bottom: 1px solid #30363d;">
+<th style="padding: 5px 0; color: #8b949e;">Strike</th>
+<th style="padding: 5px 0; text-align: right; color: #8b949e;">$\Delta$ OI (Contracts)</th>
+</tr>
+{oi_rows}
+</table>"""
+        st.sidebar.markdown(oi_table_html, unsafe_allow_html=True)
+    else:
+        st.sidebar.info("Keine OI-Veränderung zur Session-Baseline erfasst.")
+
+    # --- TOP 24H VOLUME FLOW ---
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔥 Top 24h Volume Flow")
+    top_volume_strikes = summary.sort_values('volume', ascending=False).head(3)
     
     flow_rows = ""
     for _, row in top_volume_strikes.iterrows():
@@ -229,7 +292,6 @@ try:
 <td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td>
 </tr>
 """
-    
     flow_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;">
 <tr style="border-bottom: 1px solid #30363d;">
 <th style="padding: 5px 0; color: #8b949e;">Strike</th>

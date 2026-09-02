@@ -328,7 +328,7 @@ try:
         yaxis=dict(title="Strike Price ($)", tickformat="$,.0f", gridcolor="#21262d"),
         margin=dict(l=40, r=40, t=30, b=40)
     )
-    st.plotly_chart(fig_gex_heat, use_control_bar=True, use_container_width=True)
+    st.plotly_chart(fig_gex_heat, use_container_width=True)
 
 except Exception as e:
     st.error(f"Fehler beim Verarbeiten der Daten: {e}")

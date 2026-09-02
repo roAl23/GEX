@@ -23,7 +23,7 @@ div.stMetric label { color: #8b949e !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("### 📊 Deribit Options Profile Engine (Live API + GEX Heatmap)")
+st.markdown("### 📊 Deribit Options Profile Engine (Live API)")
 
 # --- BLACK-SCHOLES GREEKS ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
@@ -115,6 +115,7 @@ try:
                                 df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01, 
                                 -df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01) / 1e6
                                 
+    # Korrigiertes VEX (Vega hat Spot bereits in USD-Einheit)
     df['vex_val'] = (df['vega'] * df['open_interest'] * contract_multiplier) / 1e6
     df['dex_val'] = (df['delta'] * df['open_interest'] * contract_multiplier * spot) / 1e6
     df['oi_val']  = df['open_interest']
@@ -231,7 +232,7 @@ try:
     st.sidebar.markdown("### 🔥 Top 24h Volume Flow")
     top_volume_strikes = summary.sort_values('volume', ascending=False).head(3)
     flow_rows = "".join([f"""<tr style="border-bottom: 1px solid #21262d;"><td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td><td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td></tr>""" for _, row in top_volume_strikes.iterrows()])
-    st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; color: #8b949e;">24h Vol</th></tr>{flow_rows}</table>""", unsafe_allow_html=True)
+    st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; text-align: right; color: #8b949e;">24h Vol</th></tr>{flow_rows}</table>""", unsafe_allow_html=True)
 
     # --- TOP METRICS ---
     st.markdown("#### 🔑 Key Levels & Spot")
@@ -274,61 +275,13 @@ try:
         fig.add_vline(x=x_val, line_dash=style, line_color=color, line_width=width, annotation_text=f"{name}", annotation_position="top", annotation_font_color=color, annotation_font_size=11)
 
     fig.update_layout(
-        template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#11141d', height=700, barmode='group',
+        template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#11141d', height=750, barmode='group',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor='rgba(0,0,0,0)'),
         xaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)", gridcolor="#21262d"),
         yaxis=dict(title="Scaled Profile Value (Visual Only)", gridcolor="#21262d", showticklabels=False),
         margin=dict(l=40, r=40, t=50, b=40)
     )
     st.plotly_chart(fig, use_container_width=True)
-
-    # ==========================================
-    # GEX HEATMAP (Strike auf Y-Achse, Expiry auf X-Achse)
-    # ==========================================
-    st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
-    st.markdown("### 🔥 Multi-Expiry GEX Heatmap (Strike vs. Expiry)")
-    st.caption("Gamma Exposure (1% GEX in Mio. $) verteilt nach Preislevel (Strike auf der Y-Achse) und Verfall (X-Achse). Blau/Grün = Positives Gamma, Rot = Negatives Gamma.")
-
-    # GEX pro Instrument berechnen
-    df_raw['instrument_gex'] = np.where(
-        df_raw['type'] == 'Call', 
-        df_raw['gamma'] * df_raw['open_interest'] * (spot**2) * 0.01, 
-        -df['gamma'] * df_raw['open_interest'] * (spot**2) * 0.01
-    ) / 1e6
-
-    # Pivot: Strikes als Index (Y-Achse), Expiries als Spalten (X-Achse)
-    gex_heatmap_data = df_raw.pivot_table(
-        index='strike', 
-        columns='expiration_str', 
-        values='instrument_gex', 
-        aggfunc='sum', 
-        fill_value=0
-    )
-
-    # Auf relevante Strikes um den Spot filtern (± 30.000$)
-    valid_strikes_heat = [s for s in gex_heatmap_data.index if spot - 30000 <= s <= spot + 30000]
-    gex_heat_filtered = gex_heatmap_data.loc[valid_strikes_heat]
-
-    fig_gex_heat = go.Figure(data=go.Heatmap(
-        z=gex_heat_filtered.values,
-        x=gex_heat_filtered.columns,
-        y=gex_heat_filtered.index,
-        colorscale='RdBu', # Divergierende Farbskala (Rot/Blau)
-        zmid=0,            # 0 ist exakt neutral (Weiß)
-        hoverongaps=False,
-        hovertemplate='Expiry: %{x}<br>Strike: $%{y:,.0f}<br>GEX (1%%): %{z:,.2f} Mio. $<extra></extra>'
-    ))
-
-    fig_gex_heat.update_layout(
-        template="plotly_dark",
-        paper_bgcolor='#0b0e14',
-        plot_bgcolor='#11141d',
-        height=650,
-        xaxis=dict(title="Expiry Date", gridcolor="#21262d"),
-        yaxis=dict(title="Strike Price ($)", tickformat="$,.0f", gridcolor="#21262d"),
-        margin=dict(l=40, r=40, t=30, b=40)
-    )
-    st.plotly_chart(fig_gex_heat, use_container_width=True)
 
 except Exception as e:
     st.error(f"Fehler beim Verarbeiten der Daten: {e}")

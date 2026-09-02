@@ -23,7 +23,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("### 📊 Deribit Options Profile Engine (Live API)")
+st.markdown("### 📊 Deribit Options Profile Engine (Live API + Flow)")
 
 # --- GREEKS BERECHNUNG ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
@@ -104,7 +104,6 @@ try:
     # ==========================================
     contract_multiplier = 1.0  
     
-    # 1% GEX = Gamma * OI * Spot^2 * 0.01 (Skaliert in Millionen USD)
     df['gex_normal'] = np.where(df['type'] == 'Call', 
                                 df['gamma'] * df['open_interest'] * contract_multiplier * (spot**2) * 0.01, 
                                 -df['gamma'] * df['open_interest'] * contract_multiplier * (spot**2) * 0.01) / 1e6
@@ -120,7 +119,7 @@ try:
     df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)]
 
     summary = df_filtered.groupby('strike').agg({
-        'gex_normal': 'sum', 'gex_volume': 'sum', 'dex_val': 'sum', 'oi_val': 'sum', 'mark_iv': 'mean'
+        'gex_normal': 'sum', 'gex_volume': 'sum', 'dex_val': 'sum', 'oi_val': 'sum', 'mark_iv': 'mean', 'volume': 'sum'
     }).reset_index().sort_values('strike')
 
     # Visuelle Skalierung für den Chart
@@ -136,8 +135,6 @@ try:
     summary['put_oi'] = summary['strike'].map(puts_dict).fillna(0)
 
     # --- KEY LEVELS ---
-    
-    # Korrigierter Gamma Flip
     sign_changes = summary[np.sign(summary['gex_normal']).diff().fillna(0) != 0].iloc[1:]
     gammaFlip = sign_changes.iloc[(sign_changes['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not sign_changes.empty else spot
     
@@ -153,20 +150,17 @@ try:
     atm_strike = summary.iloc[(summary['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not summary.empty else spot
     
     if selected_exp == "ALL (Aggregated)":
-        # Bei ALL nehmen wir den 1-Tages-Move basierend auf der kürzesten Option (Front-Month)
         min_t_years = df_raw['t_years'].min()
         matching_iv = df_raw[(df_raw['t_years'] == min_t_years) & (df_raw['strike'] == atm_strike)]['mark_iv'].values
         time_to_use = 1 / 365.0
         move_label = "1-Day"
     else:
-        # Bei spezifischem Verfall nehmen wir die echte Restlaufzeit bis zum Verfall!
         matching_iv = summary[summary['strike'] == atm_strike]['mark_iv'].values
         time_to_use = df_filtered['t_years'].mean()
         move_label = "Expiry"
 
     atm_iv = (matching_iv[0] / 100.0) if len(matching_iv) > 0 and not np.isnan(matching_iv[0]) else 0.55
 
-    # Exakte Exponential-Lognormal-Berechnung
     minMoveUpper = spot * np.exp(atm_iv * np.sqrt(time_to_use))
     minMoveLower = spot * np.exp(-atm_iv * np.sqrt(time_to_use))
     maxMoveUpper = spot * np.exp(2 * atm_iv * np.sqrt(time_to_use))
@@ -174,7 +168,7 @@ try:
     
     exp_move_dollar = minMoveUpper - spot
 
-    # --- MACRO BERECHNUNGEN (Für Sidebar) ---
+    # --- MACRO BERECHNUNGEN ---
     net_gamma = summary['gex_normal'].sum()
     net_vex = summary['gex_volume'].sum()
     gamma_regime = "🟢 Positiv (Low Vol)" if net_gamma > 0 else "🔴 Negativ (High Vol)"
@@ -184,44 +178,72 @@ try:
     pc_ratio = (total_put_oi / total_call_oi) if total_call_oi > 0 else 0.0
 
     # ==========================================
-    # SIDEBAR TABELLE
+    # SIDEBAR TABELLEN (Market Overview & 24h Flow)
     # ==========================================
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📋 Market Overview")
     
     sidebar_table_html = f"""
-    <table style="width:100%; border-collapse: collapse; font-size: 14px; text-align: left; color: #e6edf3;">
+    <table style="width:100%; border-collapse: collapse; font-size: 13px; text-align: left; color: #e6edf3;">
         <tr style="border-bottom: 1px solid #30363d;">
-            <th style="padding: 8px 0;">Metrik</th>
-            <th style="padding: 8px 0; text-align: right;">Wert</th>
+            <th style="padding: 6px 0;">Metrik</th>
+            <th style="padding: 6px 0; text-align: right;">Wert</th>
         </tr>
         <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 8px 0; color: #8b949e;">Net GEX (Mio. $)</td>
-            <td style="padding: 8px 0; text-align: right;">{net_gamma:,.2f}</td>
+            <td style="padding: 6px 0; color: #8b949e;">Net GEX (Mio. $)</td>
+            <td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f}</td>
         </tr>
         <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 8px 0; color: #8b949e;">Net VEX (Mio. $)</td>
-            <td style="padding: 8px 0; text-align: right;">{net_vex:,.2f}</td>
+            <td style="padding: 6px 0; color: #8b949e;">Net VEX (Mio. $)</td>
+            <td style="padding: 6px 0; text-align: right;">{net_vex:,.2f}</td>
         </tr>
         <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 8px 0; color: #8b949e;">Regime</td>
-            <td style="padding: 8px 0; text-align: right;">{gamma_regime}</td>
+            <td style="padding: 6px 0; color: #8b949e;">Regime</td>
+            <td style="padding: 6px 0; text-align: right;">{gamma_regime}</td>
         </tr>
         <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 8px 0; color: #8b949e;">P/C Ratio</td>
-            <td style="padding: 8px 0; text-align: right;">{pc_ratio:.2f}</td>
+            <td style="padding: 6px 0; color: #8b949e;">P/C Ratio</td>
+            <td style="padding: 6px 0; text-align: right;">{pc_ratio:.2f}</td>
         </tr>
         <tr style="border-bottom: 1px solid #30363d;">
-            <td style="padding: 8px 0; color: #8b949e;">Max Pain</td>
-            <td style="padding: 8px 0; text-align: right;">${maxPain:,.0f}</td>
+            <td style="padding: 6px 0; color: #8b949e;">Max Pain</td>
+            <td style="padding: 6px 0; text-align: right;">${maxPain:,.0f}</td>
         </tr>
         <tr>
-            <td style="padding: 8px 0; color: #8b949e;">Gamma Flip</td>
-            <td style="padding: 8px 0; text-align: right;">${gammaFlip:,.0f}</td>
+            <td style="padding: 6px 0; color: #8b949e;">Gamma Flip</td>
+            <td style="padding: 6px 0; text-align: right;">${gammaFlip:,.0f}</td>
         </tr>
     </table>
     """
     st.sidebar.markdown(sidebar_table_html, unsafe_allow_html=True)
+
+    # --- TOP 24H FLOW / OI VELOCITY SECTION ---
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔥 Top 24h Flow (Volume Velocity)")
+    st.sidebar.caption("Strikes mit dem höchsten heutigen Handelsvolumen:")
+    
+    # Finde die Top 4 Strikes nach Volumen
+    top_volume_strikes = summary.sort_values('volume', ascending=False).head(4)
+    
+    flow_rows = ""
+    for _, row in top_volume_strikes.iterrows():
+        flow_rows += f"""
+        <tr style="border-bottom: 1px solid #21262d;">
+            <td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td>
+            <td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td>
+        </tr>
+        """
+    
+    flow_table_html = f"""
+    <table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;">
+        <tr style="border-bottom: 1px solid #30363d;">
+            <th style="padding: 5px 0; color: #8b949e;">Strike</th>
+            <th style="padding: 5px 0; text-align: right; color: #8b949e;">24h Vol</th>
+        </tr>
+        {flow_rows}
+    </table>
+    """
+    st.sidebar.markdown(flow_table_html, unsafe_allow_html=True)
 
     # --- TOP METRICS ---
     st.markdown("#### 🔑 Key Levels & Spot")

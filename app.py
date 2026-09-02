@@ -364,10 +364,23 @@ try:
     # ──────────────────────────────────────────────
     atm_strike = summary.iloc[(summary["strike"] - spot).abs().argsort()[:1]]["strike"].values[0]
 
-    call_ivs = df[(df["type"]=="Call") & (df["strike"]==atm_strike)]["mark_iv"]
-    put_ivs  = df[(df["type"]=="Put")  & (df["strike"]==atm_strike)]["mark_iv"]
+    call_ivs = df[(df["type"] == "Call") & (df["strike"] == atm_strike)]["mark_iv"]
+    put_ivs  = df[(df["type"] == "Put")  & (df["strike"] == atm_strike)]["mark_iv"]
 
     if len(call_ivs) > 0 and len(put_ivs) > 0:
         atm_iv = (call_ivs.iloc[0] + put_ivs.iloc[0]) / 2.0 / 100.0
         iv_source = "Call+Put Mid"
-    elif len(call_
+    elif len(call_ivs) > 0:
+        atm_iv = call_ivs.iloc[0] / 100.0
+        iv_source = "Call only"
+    elif len(put_ivs) > 0:
+        atm_iv = put_ivs.iloc[0] / 100.0
+        iv_source = "Put only"
+    else:
+        nearest_iv = summary.iloc[(summary["strike"] - spot).abs().argsort()[:1]]["mark_iv"].values[0]
+        atm_iv = nearest_iv / 100.0
+        iv_source = "Nearest Strike"
+
+    t_use = max(df["t_years"].min(), 1e-8) if label in ["0DTE", "1DTE"] else 1 / 365.25
+    move_label = "Restlaufzeit" if label in ["0DTE", "1DTE"] else "1-Day"
+    exp_1sd = spot * atm_iv * np.sqrt(t_use)

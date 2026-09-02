@@ -65,11 +65,8 @@ try:
     
     def parse_expiration_years(exp_str):
         try:
-            # 1. Datum parsen und hart auf UTC fixieren
             exp_date = pd.to_datetime(exp_str, format='%d%b%y').tz_localize('UTC')
-            # 2. Exakt 8 Stunden addieren (Deribit Verfall ist 08:00 UTC)
             expiry_timestamp = exp_date.timestamp() + (8 * 3600)
-            # 3. Restlaufzeit berechnen (Sicherheitsnetz: minimal 1 Stunde)
             return max(expiry_timestamp - current_time, 3600) / (365.25 * 86400)
         except:
             return 1.0 / 365.25
@@ -120,11 +117,31 @@ try:
                                 df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01, 
                                 -df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01) / 1e6
                                 
-    # Korrigiertes VEX (Vega hat Spot bereits in USD-Einheit)
     df['vex_val'] = (df['vega'] * df['open_interest'] * contract_multiplier) / 1e6
     df['dex_val'] = (df['delta'] * df['open_interest'] * contract_multiplier * spot) / 1e6
     df['oi_val']  = df['open_interest']
 
+    # --- GLOBALE KEY LEVELS (Unabhängig vom Zoom-Slider!) ---
+    df_global_summary = df.groupby('strike').agg({
+        'gex_normal': 'sum', 'open_interest': 'sum'
+    }).reset_index().sort_values('strike')
+
+    calls_dict_g = df[df['type'] == 'Call'].groupby('strike')['open_interest'].sum().to_dict()
+    puts_dict_g = df[df['type'] == 'Put'].groupby('strike')['open_interest'].sum().to_dict()
+    df_global_summary['call_oi'] = df_global_summary['strike'].map(calls_dict_g).fillna(0)
+    df_global_summary['put_oi'] = df_global_summary['strike'].map(puts_dict_g).fillna(0)
+
+    # 1. Gamma Flip (Global)
+    sign_changes = df_global_summary[np.sign(df_global_summary['gex_normal']).diff().fillna(0) != 0]
+    gammaFlip = sign_changes.iloc[(sign_changes['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not sign_changes.empty else spot
+
+    # 2. Max Pain (Global)
+    strike_arr_g, call_oi_arr_g, put_oi_arr_g = df_global_summary['strike'].values, df_global_summary['call_oi'].values, df_global_summary['put_oi'].values
+    pains = [np.where(s > strike_arr_g, (s - strike_arr_g) * call_oi_arr_g, 0).sum() + np.where(strike_arr_g > s, (strike_arr_g - s) * put_oi_arr_g, 0).sum() for s in strike_arr_g]
+    maxPain = strike_arr_g[np.argmin(pains)] if len(pains) > 0 else spot
+
+
+    # --- LOKALE / ZOOM-ABHÄNGIGE WERTE (Für Chart & Intraday Walls) ---
     y_min, y_max = spot - zoom_margin, spot + zoom_margin
     df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)]
 
@@ -142,18 +159,10 @@ try:
     summary['call_oi'] = summary['strike'].map(calls_dict).fillna(0)
     summary['put_oi'] = summary['strike'].map(puts_dict).fillna(0)
 
-    # --- KEY LEVELS ---
-    sign_changes = summary[np.sign(summary['gex_normal']).diff().fillna(0) != 0].iloc[1:]
-    gammaFlip = sign_changes.iloc[(sign_changes['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not sign_changes.empty else spot
-    
     callWallIntra = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['gex_normal'].sum().idxmax() if not df_filtered.empty else spot
     putWallIntra  = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['gex_normal'].sum().abs().idxmax() if not df_filtered.empty else spot
 
-    strike_arr, call_oi_arr, put_oi_arr = summary['strike'].values, summary['call_oi'].values, summary['put_oi'].values
-    pains = [np.where(s > strike_arr, (s - strike_arr) * call_oi_arr, 0).sum() + np.where(strike_arr > s, (strike_arr - s) * put_oi_arr, 0).sum() for s in strike_arr]
-    maxPain = strike_arr[np.argmin(pains)] if len(pains) > 0 else spot
-
-    # --- SESSION STATE TRACKING (KORRIGIERT: Filter-Reset) ---
+    # --- SESSION STATE TRACKING (Filter-Reset) ---
     current_oi_dict = summary.set_index('strike')['oi_val'].to_dict()
     
     if 'initialized' not in st.session_state or st.session_state.get('last_exp') != selected_exp:
@@ -235,11 +244,12 @@ try:
         st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; text-align: right; color: #8b949e;">$\Delta$ OI</th></tr>{oi_rows}</table>""", unsafe_allow_html=True)
     else:
         st.sidebar.info("⏳ Wartet auf Flow (Noch keine OI-Veränderung zur Start-Baseline)")
+
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔥 Top 24h Volume Flow")
     top_volume_strikes = summary.sort_values('volume', ascending=False).head(3)
     flow_rows = "".join([f"""<tr style="border-bottom: 1px solid #21262d;"><td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td><td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td></tr>""" for _, row in top_volume_strikes.iterrows()])
-    st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; text-align: right; color: #8b949e;">24h Vol</th></tr>{flow_rows}</table>""", unsafe_allow_html=True)
+    st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; color: #8b949e;">24h Vol</th></tr>{flow_rows}</table>""", unsafe_allow_html=True)
 
     # --- TOP METRICS ---
     st.markdown("#### 🔑 Key Levels & Spot")

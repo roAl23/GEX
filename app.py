@@ -3,302 +3,537 @@ import requests
 import pandas as pd
 import numpy as np
 import time
+from datetime import datetime, timezone, timedelta
 from scipy.stats import norm
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="Deribit Options Profile Engine Pro", layout="wide", initial_sidebar_state="expanded")
+# ──────────────────────────────────────────────
+st.set_page_config(page_title="Deribit Options Engine v4.2", layout="wide", initial_sidebar_state="expanded")
 
-# --- CSS FÜR TERMINAL OPTIK ---
 st.markdown("""
 <style>
 .stApp { background-color: #0b0e14; color: #e6edf3; }
-div.stMetric {
-    background-color: #161b22;
-    border: 1px solid #30363d;
-    padding: 10px;
-    border-radius: 6px;
-}
+div.stMetric { background-color: #161b22; border: 1px solid #30363d; padding: 10px; border-radius: 6px; }
 div.stMetric label { color: #8b949e !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("### 📊 Deribit Options Profile Engine (Live API)")
+st.markdown("### 📊 Deribit Options Engine v4.2")
+st.caption("Einheiten-sicher · kein Spot-Fallback · bessere ATM-IV · GEX(S) · instrument_name-Join · Customer/Dealer Flow")
 
-# --- BLACK-SCHOLES GREEKS ---
-def calculate_greeks(spot, strike, t_years, iv, option_type):
-    if t_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
-        return 0.0, 0.0, 0.0, 0.5
-    d1 = (np.log(spot / strike) + (0.5 * iv**2) * t_years) / (iv * np.sqrt(t_years))
-    gamma = norm.pdf(d1) / (spot * iv * np.sqrt(t_years))
-    delta = norm.cdf(d1) if option_type == 'Call' else norm.cdf(d1) - 1.0
-    vega = (spot * np.sqrt(t_years) * norm.pdf(d1)) / 100.0
-    return gamma, delta, vega, norm.cdf(d1)
+# ──────────────────────────────────────────────
+# BLACK-SCHOLES
+# ──────────────────────────────────────────────
+def bs_greeks(spot, strike, t_years, iv, opt_type):
+    if t_years <= 1e-12 or iv <= 0 or spot <= 0 or strike <= 0 or np.isnan(t_years):
+        return np.nan, np.nan, np.nan
+    sqrt_t = np.sqrt(t_years)
+    d1 = (np.log(spot / strike) + 0.5 * iv * iv * t_years) / (iv * sqrt_t)
+    gamma = norm.pdf(d1) / (spot * iv * sqrt_t)
+    delta = norm.cdf(d1) if opt_type == "Call" else norm.cdf(d1) - 1.0
+    vega  = spot * sqrt_t * norm.pdf(d1) / 100.0
+    return gamma, delta, vega
 
-@st.cache_data(ttl=15)
-def get_btc_spot():
+# ──────────────────────────────────────────────
+# DATA
+# ──────────────────────────────────────────────
+@st.cache_data(ttl=8)
+def get_spot():
+    """Kein Fallback mehr. Bei Fehler → NaN."""
     try:
-        url = "https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd"
-        return requests.get(url).json()['result']['index_price']
-    except:
-        return 90000.0
+        r = requests.get(
+            "https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd",
+            timeout=5
+        )
+        price = float(r.json()["result"]["index_price"])
+        if not np.isfinite(price) or price <= 0:
+            return np.nan
+        return price
+    except Exception:
+        return np.nan
 
-@st.cache_data(ttl=30)
-def get_option_data():
-    url = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option"
-    return pd.DataFrame(requests.get(url).json()['result'])
+@st.cache_data(ttl=120)
+def get_instruments():
+    try:
+        r = requests.get(
+            "https://www.deribit.com/api/v2/public/get_instruments",
+            params={"currency": "BTC", "kind": "option", "expired": "false"},
+            timeout=10
+        )
+        df = pd.DataFrame(r.json()["result"])
+        return df[["instrument_name", "expiration_timestamp", "contract_size"]].copy()
+    except Exception:
+        return pd.DataFrame()
 
+@st.cache_data(ttl=12)
+def get_book_summary():
+    r = requests.get(
+        "https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
+        params={"currency": "BTC", "kind": "option"},
+        timeout=10
+    )
+    return pd.DataFrame(r.json()["result"])
+
+@st.cache_data(ttl=10)
+def get_recent_trades(count=800):
+    try:
+        r = requests.get(
+            "https://www.deribit.com/api/v2/public/get_last_trades_by_currency",
+            params={"currency": "BTC", "kind": "option", "count": count},
+            timeout=8
+        )
+        return pd.DataFrame(r.json()["result"]["trades"])
+    except Exception:
+        return pd.DataFrame()
+
+# ──────────────────────────────────────────────
 try:
-    spot = get_btc_spot()
-    df_raw = get_option_data()
+    spot = get_spot()
 
-    # Preprocessing
-    df_raw['expiration_str'] = df_raw['instrument_name'].apply(lambda x: x.split('-')[1])
-    df_raw['strike'] = df_raw['instrument_name'].apply(lambda x: float(x.split('-')[2]))
-    df_raw['type'] = df_raw['instrument_name'].apply(lambda x: 'Call' if x.endswith('-C') else 'Put')
+    # ── Punkt 2: Kein Fallback – lieber tot als falsch ──
+    if not np.isfinite(spot):
+        st.error("❌ BTC Spot konnte nicht von Deribit geladen werden. Dashboard gestoppt.")
+        st.stop()
 
-    for col in ['open_interest', 'volume', 'mark_iv']:
-        if col in df_raw.columns:
-            df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
+    df_inst = get_instruments()
+    df_raw  = get_book_summary()
+    now_utc = datetime.now(timezone.utc)
+    current_ts = time.time()
 
-    current_time = time.time()
-    
-    def parse_expiration_years(exp_str):
-        try:
-            exp_date = pd.to_datetime(exp_str, format='%d%b%y').tz_localize('UTC')
-            expiry_timestamp = exp_date.timestamp() + (8 * 3600)
-            return max(expiry_timestamp - current_time, 3600) / (365.25 * 86400)
-        except:
-            return 1.0 / 365.25
-
-    df_raw['t_years'] = df_raw['expiration_str'].apply(parse_expiration_years)
-
-    gammas, deltas, vegas = [], [], []
-    for _, row in df_raw.iterrows():
-        g, d, v, _ = calculate_greeks(spot, row['strike'], row['t_years'], row['mark_iv'] / 100.0, row['type'])
-        gammas.append(g)
-        deltas.append(d)
-        vegas.append(v)
-
-    df_raw['gamma'] = gammas
-    df_raw['delta'] = deltas
-    df_raw['vega'] = vegas
-
-    # --- SIDEBAR UI ---
-    st.sidebar.markdown("### 🎛️ Profile Selection")
-    showGex    = st.sidebar.checkbox("🟠 Show GEX Normal (Gamma)", value=True)
-    showGexVol = st.sidebar.checkbox("🩵 Show GEX Volume", value=True)
-    showDex    = st.sidebar.checkbox("🟣 Show DEX (Delta)", value=True)
-    showOi     = st.sidebar.checkbox("🟡 Show Open Interest", value=True)
-    
-    st.sidebar.markdown("### ⚖️ Visual Scaling (Divisors)")
-    div_gex = st.sidebar.number_input("GEX Divisor", value=1.0, step=0.5)
-    div_dex = st.sidebar.number_input("DEX Divisor", value=1.0, step=0.1)
-    div_oi  = st.sidebar.number_input("OI Divisor", value=100.0, step=10.0)
-
-    st.sidebar.markdown("---")
-    showDailyMove = st.sidebar.checkbox("Show Expected Move Lines", value=True)
-    expirations = sorted(df_raw['expiration_str'].unique().tolist())
-    selected_exp = st.sidebar.selectbox("🗓️ Expiry Filter", ["ALL (Aggregated)"] + expirations)
-    zoom_margin = st.sidebar.slider("📐 Zoom Range (± USD um Spot)", 1000, 20000, 5000, step=500)
-
-    df = df_raw if selected_exp == "ALL (Aggregated)" else df_raw[df_raw['expiration_str'] == selected_exp]
-
-    # ==========================================
-    # KENNZAHLEN LOGIK (1% GEX & VEX)
-    # ==========================================
-    contract_multiplier = 1.0  
-    
-    df['gex_normal'] = np.where(df['type'] == 'Call', 
-                                df['gamma'] * df['open_interest'] * contract_multiplier * (spot**2) * 0.01, 
-                                -df['gamma'] * df['open_interest'] * contract_multiplier * (spot**2) * 0.01) / 1e6
-                                
-    df['gex_volume'] = np.where(df['type'] == 'Call', 
-                                df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01, 
-                                -df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01) / 1e6
-                                
-    df['vex_val'] = (df['vega'] * df['open_interest'] * contract_multiplier) / 1e6
-    df['dex_val'] = (df['delta'] * df['open_interest'] * contract_multiplier * spot) / 1e6
-    df['oi_val']  = df['open_interest']
-
-    # --- GLOBALE KEY LEVELS (Unabhängig vom Zoom-Slider!) ---
-    df_global_summary = df.groupby('strike').agg({
-        'gex_normal': 'sum', 'open_interest': 'sum'
-    }).reset_index().sort_values('strike')
-
-    calls_dict_g = df[df['type'] == 'Call'].groupby('strike')['open_interest'].sum().to_dict()
-    puts_dict_g = df[df['type'] == 'Put'].groupby('strike')['open_interest'].sum().to_dict()
-    df_global_summary['call_oi'] = df_global_summary['strike'].map(calls_dict_g).fillna(0)
-    df_global_summary['put_oi'] = df_global_summary['strike'].map(puts_dict_g).fillna(0)
-
-    # 1. Gamma Flip (Global)
-    sign_changes = df_global_summary[np.sign(df_global_summary['gex_normal']).diff().fillna(0) != 0]
-    gammaFlip = sign_changes.iloc[(sign_changes['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not sign_changes.empty else spot
-
-    # 2. Max Pain (Global)
-    strike_arr_g, call_oi_arr_g, put_oi_arr_g = df_global_summary['strike'].values, df_global_summary['call_oi'].values, df_global_summary['put_oi'].values
-    pains = [np.where(s > strike_arr_g, (s - strike_arr_g) * call_oi_arr_g, 0).sum() + np.where(strike_arr_g > s, (strike_arr_g - s) * put_oi_arr_g, 0).sum() for s in strike_arr_g]
-    maxPain = strike_arr_g[np.argmin(pains)] if len(pains) > 0 else spot
-
-
-    # --- LOKALE / ZOOM-ABHÄNGIGE WERTE (Für Chart & Intraday Walls) ---
-    y_min, y_max = spot - zoom_margin, spot + zoom_margin
-    df_filtered = df[(df['strike'] >= y_min) & (df['strike'] <= y_max)]
-
-    summary = df_filtered.groupby('strike').agg({
-        'gex_normal': 'sum', 'gex_volume': 'sum', 'vex_val': 'sum', 'dex_val': 'sum', 'oi_val': 'sum', 'mark_iv': 'mean', 'volume': 'sum'
-    }).reset_index().sort_values('strike')
-
-    summary['gex_norm_scaled'] = summary['gex_normal'] / div_gex
-    summary['gex_vol_scaled']  = summary['gex_volume'] / div_gex
-    summary['dex_val_scaled']  = summary['dex_val'] / div_dex
-    summary['oi_val_scaled']   = summary['oi_val'] / div_oi
-
-    calls_dict = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['open_interest'].sum().to_dict()
-    puts_dict = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['open_interest'].sum().to_dict()
-    summary['call_oi'] = summary['strike'].map(calls_dict).fillna(0)
-    summary['put_oi'] = summary['strike'].map(puts_dict).fillna(0)
-
-    callWallIntra = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['gex_normal'].sum().idxmax() if not df_filtered.empty else spot
-    putWallIntra  = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['gex_normal'].sum().abs().idxmax() if not df_filtered.empty else spot
-
-    # --- SESSION STATE TRACKING (Filter-Reset) ---
-    current_oi_dict = summary.set_index('strike')['oi_val'].to_dict()
-    
-    if 'initialized' not in st.session_state or st.session_state.get('last_exp') != selected_exp:
-        st.session_state['initialized'] = True
-        st.session_state['last_exp'] = selected_exp
-        st.session_state['prev_net_gamma'] = summary['gex_normal'].sum()
-        st.session_state['prev_gamma_flip'] = gammaFlip
-        st.session_state['prev_oi'] = current_oi_dict
-
-    net_gamma = summary['gex_normal'].sum()
-    net_vex = summary['vex_val'].sum()
-    gamma_regime = "🟢 Positiv (Low Vol)" if net_gamma > 0 else "🔴 Negativ (High Vol)"
-    
-    gex_momentum = net_gamma - st.session_state['prev_net_gamma']
-    gex_arrow = "🟢 ▲" if gex_momentum >= 0 else "🔴 ▼"
-
-    flip_migration = gammaFlip - st.session_state['prev_gamma_flip']
-    flip_arrow = f"({'+' if flip_migration >= 0 else ''}{flip_migration:,.0f} $)" if flip_migration != 0 else "(Stable)"
-
-    oi_velocity_rows = []
-    for strike, curr_oi in current_oi_dict.items():
-        prev_oi = st.session_state['prev_oi'].get(strike, curr_oi)
-        delta_oi = curr_oi - prev_oi
-        if delta_oi != 0:
-            oi_velocity_rows.append({'strike': strike, 'delta_oi': delta_oi})
-    
-    df_oi_vel = pd.DataFrame(oi_velocity_rows)
-    if not df_oi_vel.empty:
-        df_oi_vel = df_oi_vel.sort_values('delta_oi', ascending=False).head(4)
-
-    total_call_oi = summary['call_oi'].sum()
-    total_put_oi = summary['put_oi'].sum()
-    pc_ratio = (total_put_oi / total_call_oi) if total_call_oi > 0 else 0.0
-
-    # --- EXPECTED MOVE ---
-    atm_strike = summary.iloc[(summary['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not summary.empty else spot
-    
-    if selected_exp == "ALL (Aggregated)":
-        min_t_years = df_raw['t_years'].min()
-        matching_iv = df_raw[(df_raw['t_years'] == min_t_years) & (df_raw['strike'] == atm_strike)]['mark_iv'].values
-        time_to_use = 1 / 365.0
-        move_label = "1-Day"
+    # Instrument Metadata
+    if not df_inst.empty:
+        df_raw = df_raw.merge(
+            df_inst[["instrument_name", "expiration_timestamp", "contract_size"]],
+            on="instrument_name", how="left"
+        )
+        # contract_size nur zur Info behalten, aber für BTC-Inverse nicht multiplizieren
+        df_raw["contract_size"] = df_raw["contract_size"].fillna(1.0)
     else:
-        matching_iv = summary[summary['strike'] == atm_strike]['mark_iv'].values
-        time_to_use = df_filtered['t_years'].mean()
-        move_label = "Expiry"
+        df_raw["expiration_timestamp"] = np.nan
+        df_raw["contract_size"] = 1.0
 
-    atm_iv = (matching_iv[0] / 100.0) if len(matching_iv) > 0 and not np.isnan(matching_iv[0]) else 0.55
+    df_raw["expiration_str"] = df_raw["instrument_name"].apply(lambda x: x.split("-")[1])
+    df_raw["strike"] = df_raw["instrument_name"].apply(lambda x: float(x.split("-")[2]))
+    df_raw["type"]   = df_raw["instrument_name"].apply(lambda x: "Call" if x.endswith("-C") else "Put")
 
-    minMoveUpper = spot * np.exp(atm_iv * np.sqrt(time_to_use))
-    minMoveLower = spot * np.exp(-atm_iv * np.sqrt(time_to_use))
-    maxMoveUpper = spot * np.exp(2 * atm_iv * np.sqrt(time_to_use))
-    maxMoveLower = spot * np.exp(-2 * atm_iv * np.sqrt(time_to_use))
-    exp_move_dollar = minMoveUpper - spot
+    for col in ["open_interest", "volume", "mark_iv"]:
+        df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce").fillna(0.0)
 
-    # --- SIDEBAR ---
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📋 Market Overview & Momentum")
-    
-    sidebar_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 13px; text-align: left; color: #e6edf3;">
-<tr style="border-bottom: 1px solid #30363d;"><th style="padding: 6px 0;">Metrik</th><th style="padding: 6px 0; text-align: right;">Wert</th></tr>
-<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Net GEX</td><td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f} Mio. $</td></tr>
-<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Session Momentum</td><td style="padding: 6px 0; text-align: right;">{gex_arrow} {gex_momentum:+,.2f}</td></tr>
-<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Net VEX (Vega Risk)</td><td style="padding: 6px 0; text-align: right;">{net_vex:,.2f} Mio. $</td></tr>
-<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Regime</td><td style="padding: 6px 0; text-align: right;">{gamma_regime}</td></tr>
-<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">P/C Ratio</td><td style="padding: 6px 0; text-align: right;">{pc_ratio:.2f}</td></tr>
-<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Max Pain</td><td style="padding: 6px 0; text-align: right;">${maxPain:,.0f}</td></tr>
-<tr><td style="padding: 6px 0; color: #8b949e;">Gamma Flip <br><span style="font-size:10px; color:#8b949e;">{flip_arrow}</span></td><td style="padding: 6px 0; text-align: right; vertical-align: middle;">${gammaFlip:,.0f}</td></tr>
-</table>"""
-    st.sidebar.markdown(sidebar_table_html, unsafe_allow_html=True)
+    # Echte Restlaufzeit
+    def remaining_years(row):
+        ts = row.get("expiration_timestamp")
+        if pd.isna(ts):
+            try:
+                exp_date = pd.to_datetime(row["expiration_str"], format="%d%b%y").tz_localize("UTC")
+                ts = (exp_date.timestamp() + 8 * 3600) * 1000
+            except Exception:
+                return np.nan
+        remaining = (ts / 1000.0) - current_ts
+        return remaining / (365.25 * 86400) if remaining > 0 else np.nan
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚡ OI Velocity ($\Delta OI$)")
-    if not df_oi_vel.empty:
-        oi_rows = ""
-        for _, row in df_oi_vel.iterrows():
-            color_code = "#00e676" if row['delta_oi'] > 0 else "#ff5252"
-            oi_rows += f"""<tr style="border-bottom: 1px solid #21262d;"><td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td><td style="padding: 5px 0; text-align: right; color: {color_code};">{row['delta_oi']:+,.1f}</td></tr>"""
-        st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; text-align: right; color: #8b949e;">$\Delta$ OI</th></tr>{oi_rows}</table>""", unsafe_allow_html=True)
+    df_raw["t_years"] = df_raw.apply(remaining_years, axis=1)
+    df_raw["expiry_ts"] = df_raw["expiration_timestamp"].fillna(0) / 1000.0
+    df_raw = df_raw[df_raw["t_years"].notna() & (df_raw["t_years"] > 0)].copy()
+
+    # 0DTE = Expiry-Datum == heute UTC
+    today = now_utc.date()
+    tomorrow = today + timedelta(days=1)
+
+    def dte_label(row):
+        if row["expiry_ts"] <= 0:
+            return "Unknown"
+        exp_date = datetime.fromtimestamp(row["expiry_ts"], tz=timezone.utc).date()
+        if exp_date == today:
+            return "0DTE"
+        if exp_date == tomorrow:
+            return "1DTE"
+        days = (exp_date - today).days
+        if days <= 3:
+            return "2-3D"
+        if days <= 7:
+            return "4-7D"
+        if days <= 30:
+            return "8-30D"
+        return ">30D"
+
+    df_raw["dte_bucket"] = df_raw.apply(dte_label, axis=1)
+    df_raw["minutes_to_exp"] = df_raw["t_years"] * 365.25 * 24 * 60
+
+    # Greeks
+    g_list, d_list, v_list = [], [], []
+    for _, r in df_raw.iterrows():
+        g, d, v = bs_greeks(spot, r["strike"], r["t_years"], r["mark_iv"]/100.0, r["type"])
+        g_list.append(g); d_list.append(d); v_list.append(v)
+    df_raw["gamma"] = g_list
+    df_raw["delta"] = d_list
+    df_raw["vega"]  = v_list
+
+    # ──────────────────────────────────────────────
+    # SIDEBAR
+    # ──────────────────────────────────────────────
+    st.sidebar.markdown("### 🎛️ Filter")
+    show_gex   = st.sidebar.checkbox("🟠 Estimated GEX", True)
+    show_oi    = st.sidebar.checkbox("🟡 Open Interest", True)
+    show_gex_s = st.sidebar.checkbox("📈 GEX(S) Kurve", True)
+    show_flow  = st.sidebar.checkbox("🌊 Flow (Customer / Dealer)", True)
+
+    flow_mode = st.sidebar.radio("Flow-Fenster", ["Trade Count", "Zeitfenster"], index=1)
+    if flow_mode == "Trade Count":
+        trade_count = st.sidebar.select_slider("Anzahl Trades", [200, 400, 600, 800, 1000], 600)
+        time_window_min = None
     else:
-        st.sidebar.info("⏳ Wartet auf Flow (Noch keine OI-Veränderung zur Start-Baseline)")
+        time_window_min = st.sidebar.select_slider("Minuten", [1, 5, 15, 30, 60, 120], 15)
+        trade_count = 1000
+
+    div_gex  = st.sidebar.number_input("GEX Divisor", 0.5, 50.0, 1.0, 0.5)
+    div_oi   = st.sidebar.number_input("OI Divisor", 10.0, 1000.0, 100.0, 10.0)
+    div_flow = st.sidebar.number_input("Flow Divisor", 0.1, 20.0, 1.0, 0.5)
+
+    buckets = ["ALL", "0DTE", "1DTE", "2-3D", "4-7D", "8-30D", ">30D"]
+    selected_bucket = st.sidebar.selectbox("📅 DTE Bucket", buckets)
+    expirations = sorted(df_raw["expiration_str"].unique().tolist())
+    selected_exp = st.sidebar.selectbox("🗓️ Single Expiry", ["— Bucket —"] + expirations)
+
+    zoom = st.sidebar.slider("Zoom ± USD", 2000, 40000, 10000, 500)
+    gex_s_pct = st.sidebar.slider("GEX(S) Range ± %", 5, 25, 12, 1)
+
+    # Filter
+    if selected_exp != "— Bucket —":
+        df = df_raw[df_raw["expiration_str"] == selected_exp].copy()
+        label = selected_exp
+    else:
+        if selected_bucket == "ALL":
+            df = df_raw.copy()
+            label = "ALL"
+        else:
+            df = df_raw[df_raw["dte_bucket"] == selected_bucket].copy()
+            label = selected_bucket
+
+    if df.empty:
+        st.warning("Keine Daten für diesen Filter.")
+        st.stop()
+
+    min_minutes = df["minutes_to_exp"].min()
+    if min_minutes < 30:
+        st.warning(f"⚠️ Sehr kurze Restlaufzeit: {min_minutes:.1f} min. Gamma kann extrem werden und schnell kollabieren.")
+
+    # ──────────────────────────────────────────────
+    # ESTIMATED GEX
+    # ──────────────────────────────────────────────
+    # WICHTIG (Punkt 1):
+    # Bei BTC-Inverse-Optionen sind open_interest und amount bereits in BTC.
+    # contract_size ist i.d.R. 1. Extra-Multiplikation wird bewusst weggelassen,
+    # um Doppelzählung zu vermeiden.
+    # Formel: gamma * OI * spot² * 0.01  → $ P&L bei +1% Move (in Mio. $)
+
+    df["gex"] = np.where(
+        df["type"] == "Call",
+         df["gamma"] * df["open_interest"] * (spot**2) * 0.01,
+        -df["gamma"] * df["open_interest"] * (spot**2) * 0.01
+    ) / 1e6
+
+    df["oi"] = df["open_interest"]
+
+    summary = df.groupby("strike").agg(
+        gex=("gex", "sum"),
+        oi=("oi", "sum"),
+        volume=("volume", "sum"),
+        mark_iv=("mark_iv", "mean"),
+        t_years=("t_years", "mean"),
+        minutes_to_exp=("minutes_to_exp", "min")
+    ).reset_index().sort_values("strike")
+
+    call_gamma_wall = df[df["type"]=="Call"].groupby("strike")["gex"].sum().idxmax() if not df.empty else spot
+    put_gamma_wall  = df[df["type"]=="Put"].groupby("strike")["gex"].sum().abs().idxmax() if not df.empty else spot
+
+    # Max Pain
+    strikes = summary["strike"].values
+    call_oi = df[df["type"]=="Call"].groupby("strike")["open_interest"].sum().reindex(strikes, fill_value=0).values
+    put_oi  = df[df["type"]=="Put"].groupby("strike")["open_interest"].sum().reindex(strikes, fill_value=0).values
+    pains = [np.sum(np.maximum(s-strikes,0)*call_oi) + np.sum(np.maximum(strikes-s,0)*put_oi) for s in strikes]
+    max_pain = strikes[np.argmin(pains)] if len(pains) else spot
+
+    # ──────────────────────────────────────────────
+    # GEX(S)
+    # ──────────────────────────────────────────────
+    pct = gex_s_pct / 100.0
+    hypo_spots = np.linspace(spot*(1-pct), spot*(1+pct), 101)
+
+    def compute_gex_at(s_hyp):
+        net = 0.0
+        for _, row in df.iterrows():
+            g, _, _ = bs_greeks(s_hyp, row["strike"], row["t_years"], row["mark_iv"]/100.0, row["type"])
+            if np.isnan(g):
+                continue
+            sign = 1.0 if row["type"] == "Call" else -1.0
+            net += sign * g * row["open_interest"] * (s_hyp**2) * 0.01
+        return net / 1e6
+
+    gex_vals = [compute_gex_at(s) for s in hypo_spots]
+    gex_s_df = pd.DataFrame({"spot": hypo_spots, "gex": gex_vals})
+
+    flips = []
+    for i in range(1, len(gex_s_df)):
+        y0, y1 = gex_s_df["gex"].iloc[i-1], gex_s_df["gex"].iloc[i]
+        if y0 * y1 < 0:
+            x0, x1 = gex_s_df["spot"].iloc[i-1], gex_s_df["spot"].iloc[i]
+            flip = x0 - y0 * (x1 - x0) / (y1 - y0)
+            flips.append(flip)
+
+    if flips:
+        nearest_flip = min(flips, key=lambda x: abs(x - spot))
+        other_flips = sorted([f for f in flips if abs(f - nearest_flip) > 50])
+    else:
+        nearest_flip = spot
+        other_flips = []
+
+    # ──────────────────────────────────────────────
+    # FLOW – instrument_name Join + Einheiten-sicher
+    # ──────────────────────────────────────────────
+    df_trades = get_recent_trades(trade_count)
+
+    flow_by_strike = pd.DataFrame()
+    net_cust_gamma = 0.0
+    net_dealer_gamma = 0.0
+    net_cust_delta = 0.0
+
+    if not df_trades.empty and "instrument_name" in df_trades.columns:
+        if time_window_min is not None and "timestamp" in df_trades.columns:
+            cutoff = (current_ts - time_window_min * 60) * 1000
+            df_trades = df_trades[df_trades["timestamp"] >= cutoff].copy()
+
+        df_trades["signed_vol"] = np.where(
+            df_trades["direction"].str.lower() == "buy",
+            df_trades["amount"],          # amount ist bereits in BTC
+            -df_trades["amount"]
+        )
+
+        # Join über instrument_name
+        greek_map = df.set_index("instrument_name")[["gamma", "delta", "type"]].to_dict("index")
+
+        def attach_greeks(row):
+            info = greek_map.get(row["instrument_name"])
+            if info is None:
+                return np.nan, np.nan, None
+            return info["gamma"], info["delta"], info.get("type")
+
+        greeks = df_trades.apply(attach_greeks, axis=1, result_type="expand")
+        df_trades["gamma"] = greeks[0]
+        df_trades["delta"] = greeks[1]
+        df_trades["opt_type"] = greeks[2]
+        df_trades = df_trades.dropna(subset=["gamma"])
+
+        # Kein extra contract_size – amount ist bereits BTC
+        df_trades["cust_gamma_flow"] = (
+            df_trades["signed_vol"] * df_trades["gamma"] * (spot**2) * 0.01
+        ) / 1e6
+
+        df_trades["cust_delta_flow"] = (
+            df_trades["signed_vol"] * df_trades["delta"] * spot
+        ) / 1e6
+
+        df_trades["dealer_gamma_flow"] = -df_trades["cust_gamma_flow"]
+
+        flow_by_strike = df_trades.groupby("strike").agg(
+            signed_vol=("signed_vol", "sum"),
+            cust_gamma_flow=("cust_gamma_flow", "sum"),
+            dealer_gamma_flow=("dealer_gamma_flow", "sum"),
+            cust_delta_flow=("cust_delta_flow", "sum"),
+            trade_count=("amount", "count")
+        ).reset_index().sort_values("cust_gamma_flow", key=abs, ascending=False)
+
+        net_cust_gamma   = flow_by_strike["cust_gamma_flow"].sum()
+        net_dealer_gamma = flow_by_strike["dealer_gamma_flow"].sum()
+        net_cust_delta   = flow_by_strike["cust_delta_flow"].sum()
+
+        summary = summary.merge(
+            flow_by_strike[["strike", "cust_gamma_flow", "dealer_gamma_flow", "signed_vol"]],
+            on="strike", how="left"
+        )
+        summary["cust_gamma_flow"] = summary["cust_gamma_flow"].fillna(0.0)
+        summary["dealer_gamma_flow"] = summary["dealer_gamma_flow"].fillna(0.0)
+
+    # ──────────────────────────────────────────────
+    # EXPECTED MOVE – bessere ATM-IV (Punkt 4)
+    # ──────────────────────────────────────────────
+    # Nächstgelegener Strike
+    atm_strike = summary.iloc[(summary["strike"] - spot).abs().argsort()[:1]]["strike"].values[0]
+
+    # Call-IV und Put-IV am ATM-Strike (oder nächstgelegen)
+    call_ivs = df[(df["type"]=="Call") & (df["strike"]==atm_strike)]["mark_iv"]
+    put_ivs  = df[(df["type"]=="Put")  & (df["strike"]==atm_strike)]["mark_iv"]
+
+    if len(call_ivs) > 0 and len(put_ivs) > 0:
+        atm_iv = (call_ivs.iloc[0] + put_ivs.iloc[0]) / 2.0 / 100.0
+        iv_source = "Call+Put Mid"
+    elif len(call_ivs) > 0:
+        atm_iv = call_ivs.iloc[0] / 100.0
+        iv_source = "Call only"
+    elif len(put_ivs) > 0:
+        atm_iv = put_ivs.iloc[0] / 100.0
+        iv_source = "Put only"
+    else:
+        # Fallback: nächster Strike aus Summary
+        atm_iv = summary.iloc[(summary["strike"]-spot).abs().argsort()[:1]]["mark_iv"].values[0] / 100.0
+        iv_source = "Nearest Strike"
+
+    t_use = max(df["t_years"].min(), 1e-8) if label in ["0DTE", "1DTE"] else 1/365.25
+    move_label = "Restlaufzeit" if label in ["0DTE", "1DTE"] else "1-Day"
+    exp_1sd = spot * atm_iv * np.sqrt(t_use)
+
+    # ──────────────────────────────────────────────
+    # METRICS
+    # ──────────────────────────────────────────────
+    net_gex = summary["gex"].sum()
+    regime = "🟢 Positive Est. GEX" if net_gex > 0 else "🔴 Negative Est. GEX"
+
+    st.markdown("#### 🔑 Key Levels")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("BTC Spot", f"${spot:,.0f}")
+    c2.metric("Nearest Gamma Flip", f"${nearest_flip:,.0f}")
+    c3.metric("Call Gamma Wall", f"${call_gamma_wall:,.0f}")
+    c4.metric("Put Gamma Wall", f"${put_gamma_wall:,.0f}")
+    c5.metric("Customer Γ-Flow", f"{net_cust_gamma:+.2f} M")
+    c6.metric("Est. Dealer Γ-Flow", f"{net_dealer_gamma:+.2f} M")
+
+    if other_flips:
+        st.caption(f"Weitere Gamma-Flips: {', '.join([f'${f:,.0f}' for f in other_flips[:4]])}")
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔥 Top 24h Volume Flow")
-    top_volume_strikes = summary.sort_values('volume', ascending=False).head(3)
-    flow_rows = "".join([f"""<tr style="border-bottom: 1px solid #21262d;"><td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td><td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td></tr>""" for _, row in top_volume_strikes.iterrows()])
-    st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; color: #8b949e;">24h Vol</th></tr>{flow_rows}</table>""", unsafe_allow_html=True)
+    st.sidebar.markdown(f"""
+**Filter:** `{label}`  
+**Net Est. GEX:** `{net_gex:,.1f} M$`  
+**Customer Γ-Flow:** `{net_cust_gamma:+.2f} M$`  
+**Est. Dealer Γ-Flow:** `{net_dealer_gamma:+.2f} M$`  
+**ATM IV ({iv_source}):** `{atm_iv*100:.1f}%`  
+**Regime:** {regime}
+""")
 
-    # --- TOP METRICS ---
-    st.markdown("#### 🔑 Key Levels & Spot")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("BTC Spot", f"${spot:,.1f}")
-    m2.metric("Intraday Call Wall", f"${callWallIntra:,.0f}")
-    m3.metric("Intraday Put Wall", f"${putWallIntra:,.0f}")
-    m4.metric(f"±1 SD {move_label} Move", f"±${exp_move_dollar:,.0f}")
+    # ──────────────────────────────────────────────
+    # CHARTS (unverändert in Struktur)
+    # ──────────────────────────────────────────────
+    y_min, y_max = spot - zoom, spot + zoom
+    sum_zoom = summary[(summary["strike"] >= y_min) & (summary["strike"] <= y_max)].copy()
 
-    st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
+    n_rows = 2 + (1 if show_gex_s else 0)
+    heights = [0.42, 0.28, 0.30] if show_gex_s else [0.55, 0.45]
 
-    # --- MAIN CHART ---
-    fig = go.Figure()
-    if showGex:
-        fig.add_trace(go.Bar(x=summary['strike'], y=summary['gex_norm_scaled'], customdata=summary['gex_normal'], hovertemplate='Strike: $%{x}<br>GEX (1%%): %{customdata:,.2f} Mio.<extra></extra>', name='🟠 GEX Normal (1%)', marker_color='#ff9800'))
-    if showGexVol:
-        fig.add_trace(go.Bar(x=summary['strike'], y=summary['gex_vol_scaled'], customdata=summary['gex_volume'], hovertemplate='Strike: $%{x}<br>VEX (1%%): %{customdata:,.2f} Mio.<extra></extra>', name='🩵 GEX Volume (1%)', marker_color='#00bcd4'))
-    if showDex:
-        fig.add_trace(go.Bar(x=summary['strike'], y=summary['dex_val_scaled'], customdata=summary['dex_val'], hovertemplate='Strike: $%{x}<br>DEX: %{customdata:,.2f} Mio.<extra></extra>', name='🟣 DEX Exposure', marker_color='#ab47bc'))
-    if showOi:
-        fig.add_trace(go.Bar(x=summary['strike'], y=summary['oi_val_scaled'], customdata=summary['oi_val'], hovertemplate='Strike: $%{x}<br>Open Interest: %{customdata:,.0f}<extra></extra>', name='🟡 Open Interest', marker_color='#ffeb3b'))
+    fig = make_subplots(
+        rows=n_rows, cols=1, shared_xaxes=False, vertical_spacing=0.07,
+        row_heights=heights[:n_rows],
+        subplot_titles=(
+            f"Strike Profile · {label}",
+            "Customer Gamma Flow (Signed)",
+            "GEX(S) – Exposure vs. hypothetischer Spot"
+        )[:n_rows]
+    )
 
-    v_lines = [
-        (spot, "SPOT", "#ffffff", "solid", 2),
-        (gammaFlip, "GAMMA FLIP", "#ffeb3b", "solid", 3),
-        (callWallIntra, "Call Wall", "#ff5252", "dot", 2),
-        (putWallIntra, "Put Wall", "#66bb6a", "dot", 2),
-        (maxPain, "Max Pain", "#ab47bc", "dash", 2),
-    ]
+    if show_gex:
+        fig.add_trace(go.Bar(
+            x=sum_zoom["strike"], y=sum_zoom["gex"]/div_gex,
+            customdata=sum_zoom["gex"], name="Est. GEX",
+            marker_color="#ff9800",
+            hovertemplate="Strike $%{x}<br>GEX %{customdata:,.2f} M$<extra></extra>"
+        ), row=1, col=1)
+    if show_oi:
+        fig.add_trace(go.Bar(
+            x=sum_zoom["strike"], y=sum_zoom["oi"]/div_oi,
+            customdata=sum_zoom["oi"], name="OI",
+            marker_color="#ffeb3b",
+            hovertemplate="Strike $%{x}<br>OI %{customdata:,.0f}<extra></extra>"
+        ), row=1, col=1)
 
-    if showDailyMove:
-        v_lines.extend([
-            (minMoveUpper, f"+1 SD ({move_label})", "#ffa726", "dash", 1),
-            (minMoveLower, f"-1 SD ({move_label})", "#ffa726", "dash", 1),
-            (maxMoveUpper, f"+2 SD ({move_label})", "#f06292", "dash", 2),
-            (maxMoveLower, f"-2 SD ({move_label})", "#f06292", "dash", 2),
-        ])
+    for val, name, color in [
+        (spot, "SPOT", "#fff"), (nearest_flip, "FLIP", "#ffeb3b"),
+        (call_gamma_wall, "Call Γ-Wall", "#ff5252"), (put_gamma_wall, "Put Γ-Wall", "#66bb6a")
+    ]:
+        fig.add_vline(x=val, line_color=color, line_width=2, annotation_text=name,
+                      annotation_font_color=color, row=1, col=1)
 
-    for x_val, name, color, style, width in v_lines:
-        fig.add_vline(x=x_val, line_dash=style, line_color=color, line_width=width, annotation_text=f"{name}", annotation_position="top", annotation_font_color=color, annotation_font_size=11)
+    if show_flow and "cust_gamma_flow" in sum_zoom.columns:
+        colors = ["#00e676" if v >= 0 else "#ff5252" for v in sum_zoom["cust_gamma_flow"]]
+        fig.add_trace(go.Bar(
+            x=sum_zoom["strike"], y=sum_zoom["cust_gamma_flow"]/div_flow,
+            customdata=sum_zoom[["cust_gamma_flow", "dealer_gamma_flow"]],
+            name="Customer Γ-Flow",
+            marker_color=colors,
+            hovertemplate="Strike $%{x}<br>Cust Γ %{customdata[0]:+.3f}<br>Dealer Γ %{customdata[1]:+.3f}<extra></extra>"
+        ), row=2, col=1)
+        fig.add_hline(y=0, line_color="#666", row=2, col=1)
+        fig.add_vline(x=spot, line_color="#fff", line_width=1.5, row=2, col=1)
+        fig.add_vline(x=nearest_flip, line_color="#ffeb3b", line_width=1.5, row=2, col=1)
+
+    if show_gex_s:
+        r = 3 if show_flow else 2
+        fig.add_trace(go.Scatter(
+            x=gex_s_df["spot"], y=gex_s_df["gex"], mode="lines", name="GEX(S)",
+            line=dict(color="#00e676", width=2.5),
+            fill="tozeroy", fillcolor="rgba(0,230,118,0.12)",
+            hovertemplate="Hypo Spot $%{x:,.0f}<br>GEX %{y:,.2f} M$<extra></extra>"
+        ), row=r, col=1)
+        fig.add_hline(y=0, line_color="#888", row=r, col=1)
+        fig.add_vline(x=spot, line_color="#fff", line_width=2, row=r, col=1)
+        fig.add_vline(x=nearest_flip, line_color="#ffeb3b", line_width=2.5, row=r, col=1)
+        for f in other_flips[:3]:
+            fig.add_vline(x=f, line_color="#ffeb3b", line_dash="dot", line_width=1, row=r, col=1)
 
     fig.update_layout(
-        template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#11141d', height=750, barmode='group',
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor='rgba(0,0,0,0)'),
-        xaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)", gridcolor="#21262d"),
-        yaxis=dict(title="Scaled Profile Value (Visual Only)", gridcolor="#21262d", showticklabels=False),
-        margin=dict(l=40, r=40, t=50, b=40)
+        template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#11141d",
+        height=900 if show_gex_s else 680, barmode="group",
+        legend=dict(orientation="h", y=1.02, x=1, xanchor="right"),
+        margin=dict(l=40, r=40, t=70, b=40)
     )
+    fig.update_xaxes(tickformat="$,.0f", gridcolor="#21262d")
+    fig.update_yaxes(gridcolor="#21262d")
     st.plotly_chart(fig, use_container_width=True)
 
+    # ──────────────────────────────────────────────
+    # TABLES
+    # ──────────────────────────────────────────────
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### 🌊 Top Customer Gamma Flow")
+        if not flow_by_strike.empty:
+            top = flow_by_strike.head(12).copy()
+            top["Dir"] = top["cust_gamma_flow"].apply(lambda x: "🟢 Buy" if x > 0 else "🔴 Sell")
+            st.dataframe(
+                top[["strike", "signed_vol", "cust_gamma_flow", "dealer_gamma_flow", "cust_delta_flow", "trade_count", "Dir"]]
+                .rename(columns={
+                    "strike": "Strike", "signed_vol": "Signed Vol (BTC)",
+                    "cust_gamma_flow": "Cust Γ", "dealer_gamma_flow": "Dealer Γ",
+                    "cust_delta_flow": "Cust Δ", "trade_count": "#Trades"
+                }).style.format({
+                    "Strike": "${:,.0f}", "Signed Vol (BTC)": "{:+.2f}",
+                    "Cust Γ": "{:+.3f}", "Dealer Γ": "{:+.3f}", "Cust Δ": "{:+.2f}"
+                }),
+                use_container_width=True, hide_index=True
+            )
+        else:
+            st.info("Keine Trades im gewählten Fenster.")
+
+    with col2:
+        st.markdown("#### ℹ️ Einheiten & Annahmen")
+        st.markdown(f"""
+**Einheiten (BTC Inverse Options)**  
+- `open_interest` / `amount` = bereits in **BTC**  
+- `contract_size` ≈ 1 → **keine Extra-Multiplikation**  
+- GEX = γ × OI × S² × 0.01 → $ P&L bei +1 % Move  
+
+**ATM-IV Quelle:** `{iv_source}`  
+**Expected Move (±1 SD):** ±${exp_1sd:,.0f} ({move_label})
+
+**Customer Γ-Flow** = Aggressor-Richtung  
+**Est. Dealer Γ-Flow** = –Customer (Modellannahme)
+""")
+
+    st.info("""
+**v4.2 Änderungen**
+1. **Einheiten**: Keine doppelte Multiplikation mit contract_size mehr (OI/amount sind schon BTC).
+2. **Spot-Fallback entfernt**: Bei API-Fehler stoppt das Dashboard sauber.
+3. **ATM-IV**: Mittel aus Call- + Put-IV am ATM-Strike (falls verfügbar).
+""")
+
 except Exception as e:
-    st.error(f"Fehler beim Verarbeiten der Daten: {e}")
+    st.error(f"Fehler: {e}")
+    st.exception(e)

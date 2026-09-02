@@ -116,9 +116,10 @@ try:
                                 df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01, 
                                 -df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01) / 1e6
                                 
-    # Vega Exposure (VEX) pro 1% Vola-Versatz in Mio. $
-    df['vex_val'] = (df['vega'] * df['open_interest'] * contract_multiplier * spot) / 1e6
+   # Vega Exposure (VEX) pro 1% Vola-Versatz in Mio. $ (Vega hat den Spot schon drin!)
+    df['vex_val'] = (df['vega'] * df['open_interest'] * contract_multiplier) / 1e6
 
+    # Delta Exposure (DEX) in Mio. $ (Delta braucht den Spot zur USD-Umrechnung)
     df['dex_val'] = (df['delta'] * df['open_interest'] * contract_multiplier * spot) / 1e6
     df['oi_val']  = df['open_interest']
 

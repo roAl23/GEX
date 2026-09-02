@@ -233,7 +233,8 @@ try:
             color_code = "#00e676" if row['delta_oi'] > 0 else "#ff5252"
             oi_rows += f"""<tr style="border-bottom: 1px solid #21262d;"><td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td><td style="padding: 5px 0; text-align: right; color: {color_code};">{row['delta_oi']:+,.1f}</td></tr>"""
         st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; text-align: right; color: #8b949e;">$\Delta$ OI</th></tr>{oi_rows}</table>""", unsafe_allow_html=True)
-
+    else:
+        st.sidebar.info("⏳ Wartet auf Flow (Noch keine OI-Veränderung zur Start-Baseline)")
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔥 Top 24h Volume Flow")
     top_volume_strikes = summary.sort_values('volume', ascending=False).head(3)

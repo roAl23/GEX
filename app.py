@@ -23,7 +23,7 @@ div.stMetric label { color: #8b949e !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("### 📊 Deribit Options Profile Engine (Live API + Heatmap)")
+st.markdown("### 📊 Deribit Options Profile Engine (Live API + GEX Heatmap)")
 
 # --- BLACK-SCHOLES GREEKS ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
@@ -231,7 +231,7 @@ try:
     st.sidebar.markdown("### 🔥 Top 24h Volume Flow")
     top_volume_strikes = summary.sort_values('volume', ascending=False).head(3)
     flow_rows = "".join([f"""<tr style="border-bottom: 1px solid #21262d;"><td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td><td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td></tr>""" for _, row in top_volume_strikes.iterrows()])
-    st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; text-align: right; color: #8b949e;">24h Vol</th></tr>{flow_rows}</table>""", unsafe_allow_html=True)
+    st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; color: #8b949e;">24h Vol</th></tr>{flow_rows}</table>""", unsafe_allow_html=True)
 
     # --- TOP METRICS ---
     st.markdown("#### 🔑 Key Levels & Spot")
@@ -283,42 +283,52 @@ try:
     st.plotly_chart(fig, use_container_width=True)
 
     # ==========================================
-    # MULTI-EXPIRY HEATMAP (Strike vs. Expiry)
+    # GEX HEATMAP (Strike auf Y-Achse, Expiry auf X-Achse)
     # ==========================================
     st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
-    st.markdown("### 🔥 Multi-Expiry Open Interest Heatmap (Strike vs. Expiry)")
-    st.caption("Diese Matrix zeigt dir die Verteilung des Open Interests über alle Laufzeiten und Strikes gleichzeitig.")
+    st.markdown("### 🔥 Multi-Expiry GEX Heatmap (Strike vs. Expiry)")
+    st.caption("Gamma Exposure (1% GEX in Mio. $) verteilt nach Preislevel (Strike auf der Y-Achse) und Verfall (X-Achse). Blau/Grün = Positives Gamma, Rot = Negatives Gamma.")
 
-    heatmap_data = df_raw.pivot_table(
-        index='expiration_str', 
-        columns='strike', 
-        values='open_interest', 
+    # GEX pro Instrument berechnen
+    df_raw['instrument_gex'] = np.where(
+        df_raw['type'] == 'Call', 
+        df_raw['gamma'] * df_raw['open_interest'] * (spot**2) * 0.01, 
+        -df['gamma'] * df_raw['open_interest'] * (spot**2) * 0.01
+    ) / 1e6
+
+    # Pivot: Strikes als Index (Y-Achse), Expiries als Spalten (X-Achse)
+    gex_heatmap_data = df_raw.pivot_table(
+        index='strike', 
+        columns='expiration_str', 
+        values='instrument_gex', 
         aggfunc='sum', 
         fill_value=0
     )
 
-    valid_strikes = [s for s in heatmap_data.columns if spot - 30000 <= s <= spot + 30000]
-    heatmap_filtered = heatmap_data[valid_strikes]
+    # Auf relevante Strikes um den Spot filtern (± 30.000$)
+    valid_strikes_heat = [s for s in gex_heatmap_data.index if spot - 30000 <= s <= spot + 30000]
+    gex_heat_filtered = gex_heatmap_data.loc[valid_strikes_heat]
 
-    fig_heat = go.Figure(data=go.Heatmap(
-        z=heatmap_filtered.values,
-        x=heatmap_filtered.columns,
-        y=heatmap_filtered.index,
-        colorscale='Plasma',
+    fig_gex_heat = go.Figure(data=go.Heatmap(
+        z=gex_heat_filtered.values,
+        x=gex_heat_filtered.columns,
+        y=gex_heat_filtered.index,
+        colorscale='RdBu', # Divergierende Farbskala (Rot/Blau)
+        zmid=0,            # 0 ist exakt neutral (Weiß)
         hoverongaps=False,
-        hovertemplate='Expiry: %{y}<br>Strike: $%{x}<br>Open Interest: %{z:,.0f} Contracts<extra></extra>'
+        hovertemplate='Expiry: %{x}<br>Strike: $%{y:,.0f}<br>GEX (1%%): %{z:,.2f} Mio. $<extra></extra>'
     ))
 
-    fig_heat.update_layout(
+    fig_gex_heat.update_layout(
         template="plotly_dark",
         paper_bgcolor='#0b0e14',
         plot_bgcolor='#11141d',
-        height=450,
-        xaxis=dict(title="Strike Price ($)", tickformat="$,.0f", gridcolor="#21262d"),
-        yaxis=dict(title="Expiry", gridcolor="#21262d"),
+        height=650,
+        xaxis=dict(title="Expiry Date", gridcolor="#21262d"),
+        yaxis=dict(title="Strike Price ($)", tickformat="$,.0f", gridcolor="#21262d"),
         margin=dict(l=40, r=40, t=30, b=40)
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_gex_heat, use_control_bar=True, use_container_width=True)
 
 except Exception as e:
     st.error(f"Fehler beim Verarbeiten der Daten: {e}")

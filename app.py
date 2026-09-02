@@ -23,16 +23,15 @@ div.stMetric label { color: #8b949e !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("### 📊 Deribit Options Profile Engine (Live API + Advanced Flow)")
+st.markdown("### 📊 Deribit Options Profile Engine (Live API + Heatmap)")
 
-# --- BLACK-SCHOLES GREEKS (Inklusive Vega & Vanna-Basis) ---
+# --- BLACK-SCHOLES GREEKS ---
 def calculate_greeks(spot, strike, t_years, iv, option_type):
     if t_years <= 0 or iv <= 0 or spot <= 0 or strike <= 0:
         return 0.0, 0.0, 0.0, 0.5
     d1 = (np.log(spot / strike) + (0.5 * iv**2) * t_years) / (iv * np.sqrt(t_years))
     gamma = norm.pdf(d1) / (spot * iv * np.sqrt(t_years))
     delta = norm.cdf(d1) if option_type == 'Call' else norm.cdf(d1) - 1.0
-    # Vega (Skaliert auf 1% Änderung der IV, d.h. geteilt durch 100)
     vega = (spot * np.sqrt(t_years) * norm.pdf(d1)) / 100.0
     return gamma, delta, vega, norm.cdf(d1)
 
@@ -116,10 +115,7 @@ try:
                                 df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01, 
                                 -df['gamma'] * df['volume'] * contract_multiplier * (spot**2) * 0.01) / 1e6
                                 
-   # Vega Exposure (VEX) pro 1% Vola-Versatz in Mio. $ (Vega hat den Spot schon drin!)
     df['vex_val'] = (df['vega'] * df['open_interest'] * contract_multiplier) / 1e6
-
-    # Delta Exposure (DEX) in Mio. $ (Delta braucht den Spot zur USD-Umrechnung)
     df['dex_val'] = (df['delta'] * df['open_interest'] * contract_multiplier * spot) / 1e6
     df['oi_val']  = df['open_interest']
 
@@ -130,13 +126,11 @@ try:
         'gex_normal': 'sum', 'gex_volume': 'sum', 'vex_val': 'sum', 'dex_val': 'sum', 'oi_val': 'sum', 'mark_iv': 'mean', 'volume': 'sum'
     }).reset_index().sort_values('strike')
 
-    # Visuelle Skalierung für den Chart
     summary['gex_norm_scaled'] = summary['gex_normal'] / div_gex
     summary['gex_vol_scaled']  = summary['gex_volume'] / div_gex
     summary['dex_val_scaled']  = summary['dex_val'] / div_dex
     summary['oi_val_scaled']   = summary['oi_val'] / div_oi
 
-    # OI für Max Pain trennen
     calls_dict = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['open_interest'].sum().to_dict()
     puts_dict = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['open_interest'].sum().to_dict()
     summary['call_oi'] = summary['strike'].map(calls_dict).fillna(0)
@@ -149,12 +143,11 @@ try:
     callWallIntra = df_filtered[df_filtered['type'] == 'Call'].groupby('strike')['gex_normal'].sum().idxmax() if not df_filtered.empty else spot
     putWallIntra  = df_filtered[df_filtered['type'] == 'Put'].groupby('strike')['gex_normal'].sum().abs().idxmax() if not df_filtered.empty else spot
 
-    # Echte Max-Pain-Berechnung
     strike_arr, call_oi_arr, put_oi_arr = summary['strike'].values, summary['call_oi'].values, summary['put_oi'].values
     pains = [np.where(s > strike_arr, (s - strike_arr) * call_oi_arr, 0).sum() + np.where(strike_arr > s, (strike_arr - s) * put_oi_arr, 0).sum() for s in strike_arr]
     maxPain = strike_arr[np.argmin(pains)] if len(pains) > 0 else spot
 
-    # --- SESSION STATE TRACKING (Für 24h Momentum & Migration) ---
+    # --- SESSION STATE TRACKING ---
     current_oi_dict = summary.set_index('strike')['oi_val'].to_dict()
     
     if 'initialized' not in st.session_state:
@@ -163,20 +156,16 @@ try:
         st.session_state['prev_gamma_flip'] = gammaFlip
         st.session_state['prev_oi'] = current_oi_dict
 
-    # Momentum Berechnungen
     net_gamma = summary['gex_normal'].sum()
     net_vex = summary['vex_val'].sum()
     gamma_regime = "🟢 Positiv (Low Vol)" if net_gamma > 0 else "🔴 Negativ (High Vol)"
     
-    # 1. Net GEX Momentum (Veränderung seit Start)
     gex_momentum = net_gamma - st.session_state['prev_net_gamma']
     gex_arrow = "🟢 ▲" if gex_momentum >= 0 else "🔴 ▼"
 
-    # 4. Gamma-Flip Migration (Wanderung)
     flip_migration = gammaFlip - st.session_state['prev_gamma_flip']
     flip_arrow = f"({'+' if flip_migration >= 0 else ''}{flip_migration:,.0f} $)" if flip_migration != 0 else "(Stable)"
 
-    # 2. Open Interest Velocity ($\Delta OI$) pro Strike berechnen
     oi_velocity_rows = []
     for strike, curr_oi in current_oi_dict.items():
         prev_oi = st.session_state['prev_oi'].get(strike, curr_oi)
@@ -192,7 +181,7 @@ try:
     total_put_oi = summary['put_oi'].sum()
     pc_ratio = (total_put_oi / total_call_oi) if total_call_oi > 0 else 0.0
 
-    # --- EXPECTED MOVE (LOGNORMAL) ---
+    # --- EXPECTED MOVE ---
     atm_strike = summary.iloc[(summary['strike'] - spot).abs().argsort()[:1]]['strike'].values[0] if not summary.empty else spot
     
     if selected_exp == "ALL (Aggregated)":
@@ -211,96 +200,38 @@ try:
     minMoveLower = spot * np.exp(-atm_iv * np.sqrt(time_to_use))
     maxMoveUpper = spot * np.exp(2 * atm_iv * np.sqrt(time_to_use))
     maxMoveLower = spot * np.exp(-2 * atm_iv * np.sqrt(time_to_use))
-    
     exp_move_dollar = minMoveUpper - spot
 
-    # ==========================================
-    # SIDEBAR TABELLEN (Market Overview & Flow)
-    # ==========================================
+    # --- SIDEBAR ---
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📋 Market Overview & Momentum")
     
     sidebar_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 13px; text-align: left; color: #e6edf3;">
-<tr style="border-bottom: 1px solid #30363d;">
-<th style="padding: 6px 0;">Metrik</th>
-<th style="padding: 6px 0; text-align: right;">Wert</th>
-</tr>
-<tr style="border-bottom: 1px solid #30363d;">
-<td style="padding: 6px 0; color: #8b949e;">Net GEX</td>
-<td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f} Mio. $</td>
-</tr>
-<tr style="border-bottom: 1px solid #30363d;">
-<td style="padding: 6px 0; color: #8b949e;">24h GEX Momentum</td>
-<td style="padding: 6px 0; text-align: right;">{gex_arrow} {gex_momentum:+,.2f}</td>
-</tr>
-<tr style="border-bottom: 1px solid #30363d;">
-<td style="padding: 6px 0; color: #8b949e;">Net VEX (Vega Risk)</td>
-<td style="padding: 6px 0; text-align: right;">{net_vex:,.2f} Mio. $</td>
-</tr>
-<tr style="border-bottom: 1px solid #30363d;">
-<td style="padding: 6px 0; color: #8b949e;">Regime</td>
-<td style="padding: 6px 0; text-align: right;">{gamma_regime}</td>
-</tr>
-<tr style="border-bottom: 1px solid #30363d;">
-<td style="padding: 6px 0; color: #8b949e;">P/C Ratio</td>
-<td style="padding: 6px 0; text-align: right;">{pc_ratio:.2f}</td>
-</tr>
-<tr style="border-bottom: 1px solid #30363d;">
-<td style="padding: 6px 0; color: #8b949e;">Max Pain</td>
-<td style="padding: 6px 0; text-align: right;">${maxPain:,.0f}</td>
-</tr>
-<tr>
-<td style="padding: 6px 0; color: #8b949e;">Gamma Flip <br><span style="font-size:10px; color:#8b949e;">{flip_arrow}</span></td>
-<td style="padding: 6px 0; text-align: right; vertical-align: middle;">${gammaFlip:,.0f}</td>
-</tr>
+<tr style="border-bottom: 1px solid #30363d;"><th style="padding: 6px 0;">Metrik</th><th style="padding: 6px 0; text-align: right;">Wert</th></tr>
+<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Net GEX</td><td style="padding: 6px 0; text-align: right;">{net_gamma:,.2f} Mio. $</td></tr>
+<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">24h GEX Momentum</td><td style="padding: 6px 0; text-align: right;">{gex_arrow} {gex_momentum:+,.2f}</td></tr>
+<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Net VEX (Vega Risk)</td><td style="padding: 6px 0; text-align: right;">{net_vex:,.2f} Mio. $</td></tr>
+<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Regime</td><td style="padding: 6px 0; text-align: right;">{gamma_regime}</td></tr>
+<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">P/C Ratio</td><td style="padding: 6px 0; text-align: right;">{pc_ratio:.2f}</td></tr>
+<tr style="border-bottom: 1px solid #30363d;"><td style="padding: 6px 0; color: #8b949e;">Max Pain</td><td style="padding: 6px 0; text-align: right;">${maxPain:,.0f}</td></tr>
+<tr><td style="padding: 6px 0; color: #8b949e;">Gamma Flip <br><span style="font-size:10px; color:#8b949e;">{flip_arrow}</span></td><td style="padding: 6px 0; text-align: right; vertical-align: middle;">${gammaFlip:,.0f}</td></tr>
 </table>"""
     st.sidebar.markdown(sidebar_table_html, unsafe_allow_html=True)
 
-    # --- TOP 24H OI VELOCITY ($\Delta OI$) ---
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ OI Velocity ($\Delta OI 24h$)")
-    st.sidebar.caption("Strikes mit dem größten Open-Interest-Zuwachs:")
-    
     if not df_oi_vel.empty:
         oi_rows = ""
         for _, row in df_oi_vel.iterrows():
             color_code = "#00e676" if row['delta_oi'] > 0 else "#ff5252"
-            oi_rows += f"""<tr style="border-bottom: 1px solid #21262d;">
-<td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td>
-<td style="padding: 5px 0; text-align: right; color: {color_code};">{row['delta_oi']:+,.1f}</td>
-</tr>
-"""
-        oi_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;">
-<tr style="border-bottom: 1px solid #30363d;">
-<th style="padding: 5px 0; color: #8b949e;">Strike</th>
-<th style="padding: 5px 0; text-align: right; color: #8b949e;">$\Delta$ OI (Contracts)</th>
-</tr>
-{oi_rows}
-</table>"""
-        st.sidebar.markdown(oi_table_html, unsafe_allow_html=True)
-    else:
-        st.sidebar.info("Keine OI-Veränderung zur Session-Baseline erfasst.")
+            oi_rows += f"""<tr style="border-bottom: 1px solid #21262d;"><td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td><td style="padding: 5px 0; text-align: right; color: {color_code};">{row['delta_oi']:+,.1f}</td></tr>"""
+        st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; text-align: right; color: #8b949e;">$\Delta$ OI</th></tr>{oi_rows}</table>""", unsafe_allow_html=True)
 
-    # --- TOP 24H VOLUME FLOW ---
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔥 Top 24h Volume Flow")
     top_volume_strikes = summary.sort_values('volume', ascending=False).head(3)
-    
-    flow_rows = ""
-    for _, row in top_volume_strikes.iterrows():
-        flow_rows += f"""<tr style="border-bottom: 1px solid #21262d;">
-<td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td>
-<td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td>
-</tr>
-"""
-    flow_table_html = f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;">
-<tr style="border-bottom: 1px solid #30363d;">
-<th style="padding: 5px 0; color: #8b949e;">Strike</th>
-<th style="padding: 5px 0; text-align: right; color: #8b949e;">24h Vol</th>
-</tr>
-{flow_rows}
-</table>"""
-    st.sidebar.markdown(flow_table_html, unsafe_allow_html=True)
+    flow_rows = "".join([f"""<tr style="border-bottom: 1px solid #21262d;"><td style="padding: 5px 0; color: #e6edf3;">${row['strike']:,.0f}</td><td style="padding: 5px 0; text-align: right; color: #00bcd4;">{row['volume']:,.1f} BTC</td></tr>""" for _, row in top_volume_strikes.iterrows()])
+    st.sidebar.markdown(f"""<table style="width:100%; border-collapse: collapse; font-size: 12px; text-align: left;"><tr style="border-bottom: 1px solid #30363d;"><th style="padding: 5px 0; color: #8b949e;">Strike</th><th style="padding: 5px 0; text-align: right; color: #8b949e;">24h Vol</th></tr>{flow_rows}</table>""", unsafe_allow_html=True)
 
     # --- TOP METRICS ---
     st.markdown("#### 🔑 Key Levels & Spot")
@@ -312,11 +243,8 @@ try:
 
     st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
 
-    # ==========================================
-    # CHART RENDERING (Vertical Histogram)
-    # ==========================================
+    # --- MAIN CHART ---
     fig = go.Figure()
-
     if showGex:
         fig.add_trace(go.Bar(x=summary['strike'], y=summary['gex_norm_scaled'], customdata=summary['gex_normal'], hovertemplate='Strike: $%{x}<br>GEX (1%%): %{customdata:,.2f} Mio.<extra></extra>', name='🟠 GEX Normal (1%)', marker_color='#ff9800'))
     if showGexVol:
@@ -346,26 +274,21 @@ try:
         fig.add_vline(x=x_val, line_dash=style, line_color=color, line_width=width, annotation_text=f"{name}", annotation_position="top", annotation_font_color=color, annotation_font_size=11)
 
     fig.update_layout(
-        template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#11141d', height=750, barmode='group',
+        template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#11141d', height=700, barmode='group',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor='rgba(0,0,0,0)'),
         xaxis=dict(range=[y_min, y_max], tickformat="$,.0f", title="Strike Price ($)", gridcolor="#21262d"),
         yaxis=dict(title="Scaled Profile Value (Visual Only)", gridcolor="#21262d", showticklabels=False),
         margin=dict(l=40, r=40, t=50, b=40)
     )
-
     st.plotly_chart(fig, use_container_width=True)
 
-except Exception as e:
-    st.error(f"Fehler beim Verarbeiten der Daten: {e}")
-
-# ==========================================
-    # ZUSATZ: MULTI-EXPIRY HEATMAP (Strike vs. Expiry)
+    # ==========================================
+    # MULTI-EXPIRY HEATMAP (Strike vs. Expiry)
     # ==========================================
     st.markdown("<hr style='border: 1px solid #30363d;'>", unsafe_allow_html=True)
     st.markdown("### 🔥 Multi-Expiry Open Interest Heatmap (Strike vs. Expiry)")
     st.caption("Diese Matrix zeigt dir die Verteilung des Open Interests über alle Laufzeiten und Strikes gleichzeitig.")
 
-    # Pivot-Tabelle erstellen: Expiries als Zeilen, Strikes als Spalten
     heatmap_data = df_raw.pivot_table(
         index='expiration_str', 
         columns='strike', 
@@ -374,7 +297,6 @@ except Exception as e:
         fill_value=0
     )
 
-    # Nur Strikes in der Nähe des Spots anzeigen, um die Heatmap übersichtlich zu halten (z.B. ± 30.000$)
     valid_strikes = [s for s in heatmap_data.columns if spot - 30000 <= s <= spot + 30000]
     heatmap_filtered = heatmap_data[valid_strikes]
 
@@ -382,8 +304,8 @@ except Exception as e:
         z=heatmap_filtered.values,
         x=heatmap_filtered.columns,
         y=heatmap_filtered.index,
-        colorscale='Plasma', # Schöner Krypto-Terminal-Look (Plasma, Viridis oder Cividis)
-        hoverongaps = False,
+        colorscale='Plasma',
+        hoverongaps=False,
         hovertemplate='Expiry: %{y}<br>Strike: $%{x}<br>Open Interest: %{z:,.0f} Contracts<extra></extra>'
     ))
 
@@ -396,5 +318,7 @@ except Exception as e:
         yaxis=dict(title="Expiry", gridcolor="#21262d"),
         margin=dict(l=40, r=40, t=30, b=40)
     )
-
     st.plotly_chart(fig_heat, use_container_width=True)
+
+except Exception as e:
+    st.error(f"Fehler beim Verarbeiten der Daten: {e}")
